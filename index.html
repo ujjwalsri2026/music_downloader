@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="glassmorphism">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MusicGrab - Free Music Downloader</title>
+    <meta name="description" content="Download music from YouTube, Spotify, JioSaavn, and more. 100% browser-based, no server required.">
+    <meta property="og:title" content="MusicGrab - Free Music Downloader">
+    <meta property="og:description" content="Download music from YouTube, Spotify, JioSaavn, and more. 100% browser-based.">
+    <meta name="theme-color" content="#0a0a0a">
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@400;500;600;700&family=Poppins:wght@300;400;500;600;700;800;900&family=Montserrat:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="css/themes.css">
+    <link rel="stylesheet" href="css/animations.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        'inter': ['Inter', 'sans-serif'],
+                        'poppins': ['Poppins', 'sans-serif'],
+                        'montserrat': ['Montserrat', 'sans-serif'],
+                        'playfair': ['Playfair Display', 'serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body { overflow-x: hidden; min-height: 100vh; }
+        #particles-container { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+        .particle { position: absolute; border-radius: 50%; pointer-events: none; }
+        .hidden { display: none !important; }
+        .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+            .particle { display: none !important; }
+        }
+    </style>
+</head>
+<body>
+    <div id="particles-container"></div>
+
+    <div id="app" class="relative z-10 min-h-screen flex flex-col">
+        <!-- Header -->
+        <header id="header" class="px-4 py-4 sm:px-6 lg:px-8">
+            <div class="max-w-3xl mx-auto flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div id="logo-icon" class="w-10 h-10 rounded-full flex items-center justify-center">
+                        <i class="fa-solid fa-music text-lg"></i>
+                    </div>
+                    <h1 id="app-title" class="text-xl font-semibold tracking-tight">MusicGrab</h1>
+                </div>
+                <button id="theme-toggle" class="w-8 h-8 rounded-full transition-all duration-300 hover:scale-110" title="Toggle theme" aria-label="Toggle theme">
+                    <span id="theme-dot" class="block w-full h-full rounded-full"></span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="flex-1 px-4 sm:px-6 lg:px-8 pb-12">
+            <div class="max-w-3xl mx-auto">
+                <!-- Hero Text -->
+                <div id="hero-section" class="text-center mb-8 mt-4 sm:mt-8">
+                    <h2 id="hero-title" class="text-3xl sm:text-4xl font-bold mb-3">Download Music Instantly</h2>
+                    <p id="hero-subtitle" class="text-base sm:text-lg opacity-70">Paste a link. Get the MP3. 100% browser-based.</p>
+                </div>
+
+                <!-- Input Card -->
+                <div id="input-card" class="rounded-2xl p-4 sm:p-6 mb-6">
+                    <div class="flex flex-col sm:flex-row gap-3">
+                        <div class="flex-1 relative">
+                            <span id="platform-icon" class="absolute left-4 top-1/2 -translate-y-1/2 text-lg opacity-50 hidden"></span>
+                            <input
+                                id="url-input"
+                                type="url"
+                                placeholder="Paste a music link here..."
+                                class="w-full pl-11 pr-4 py-3.5 text-base outline-none transition-all duration-300"
+                                autocomplete="off"
+                                spellcheck="false"
+                            >
+                        </div>
+                        <button
+                            id="fetch-btn"
+                            class="px-6 py-3.5 font-semibold text-sm tracking-wide rounded-xl transition-all duration-300 flex items-center justify-center gap-2 whitespace-nowrap"
+                        >
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <span>Fetch</span>
+                        </button>
+                    </div>
+                    <div id="input-hint" class="mt-3 text-xs opacity-50 text-center">
+                        Supports YouTube, Spotify, JioSaavn, Gaana, SoundCloud & more
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div id="loading-state" class="hidden">
+                    <div id="loading-card" class="rounded-2xl p-6 mb-6 text-center">
+                        <div class="equalizer flex items-end justify-center gap-1.5 h-12 mb-4">
+                            <div class="eq-bar w-2 rounded-t-sm"></div>
+                            <div class="eq-bar w-2 rounded-t-sm"></div>
+                            <div class="eq-bar w-2 rounded-t-sm"></div>
+                            <div class="eq-bar w-2 rounded-t-sm"></div>
+                            <div class="eq-bar w-2 rounded-t-sm"></div>
+                        </div>
+                        <p id="loading-text" class="text-sm font-medium">Resolving track...</p>
+                    </div>
+                </div>
+
+                <!-- Error State -->
+                <div id="error-state" class="hidden">
+                    <div id="error-card" class="rounded-2xl p-6 mb-6">
+                        <div class="flex items-start gap-3">
+                            <div class="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 bg-red-500/20">
+                                <i class="fa-solid fa-circle-exclamation text-red-400"></i>
+                            </div>
+                            <div class="flex-1">
+                                <h3 class="font-semibold text-sm mb-1">Something went wrong</h3>
+                                <p id="error-message" class="text-sm opacity-70"></p>
+                            </div>
+                            <button id="error-close" class="w-7 h-7 rounded-full flex items-center justify-center opacity-50 hover:opacity-100 transition-opacity">
+                                <i class="fa-solid fa-xmark text-sm"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Result Card -->
+                <div id="result-state" class="hidden">
+                    <div id="result-card" class="rounded-2xl p-4 sm:p-6 mb-6">
+                        <div class="flex flex-col sm:flex-row gap-4">
+                            <!-- Cover Art -->
+                            <div class="w-full sm:w-40 h-40 rounded-xl overflow-hidden flex-shrink-0 mx-auto sm:mx-0">
+                                <img id="cover-art" src="" alt="Cover art" class="w-full h-full object-cover">
+                            </div>
+                            <!-- Track Info -->
+                            <div class="flex-1 min-w-0">
+                                <h3 id="track-title" class="text-lg sm:text-xl font-bold truncate mb-1"></h3>
+                                <p id="track-artist" class="text-sm opacity-70 truncate mb-2"></p>
+                                <div class="flex items-center gap-3 text-xs opacity-50 mb-4">
+                                    <span id="track-duration" class="flex items-center gap-1">
+                                        <i class="fa-regular fa-clock"></i>
+                                        <span></span>
+                                    </span>
+                                    <span id="track-platform" class="flex items-center gap-1">
+                                        <i class="fa-brands"></i>
+                                        <span></span>
+                                    </span>
+                                </div>
+
+                                <!-- Progress Bar -->
+                                <div id="progress-container" class="hidden mb-4">
+                                    <div class="flex justify-between text-xs mb-1">
+                                        <span id="progress-label">Downloading...</span>
+                                        <span id="progress-percent">0%</span>
+                                    </div>
+                                    <div class="w-full h-2 rounded-full overflow-hidden opacity-30">
+                                        <div id="progress-bar" class="h-full rounded-full transition-all duration-200" style="width: 0%"></div>
+                                    </div>
+                                    <div class="text-xs opacity-50 mt-1">
+                                        <span id="progress-size">0 MB / 0 MB</span>
+                                    </div>
+                                </div>
+
+                                <!-- Action Buttons -->
+                                <div class="flex flex-wrap gap-2">
+                                    <button
+                                        id="download-btn"
+                                        class="px-5 py-2.5 font-semibold text-sm rounded-lg transition-all duration-300 flex items-center gap-2"
+                                    >
+                                        <i class="fa-solid fa-download"></i>
+                                        <span>Download MP3</span>
+                                    </button>
+                                    <button
+                                        id="copy-link-btn"
+                                        class="px-4 py-2.5 font-medium text-sm rounded-lg transition-all duration-300 flex items-center gap-2 opacity-70 hover:opacity-100"
+                                    >
+                                        <i class="fa-regular fa-copy"></i>
+                                        <span>Copy Link</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Supported Platforms -->
+                <div id="supported-section" class="text-center mt-8 mb-4">
+                    <p class="text-xs font-medium uppercase tracking-widest opacity-40 mb-3">Supported Platforms</p>
+                    <div class="flex flex-wrap justify-center gap-3 opacity-50">
+                        <span class="flex items-center gap-1.5 text-xs"><i class="fa-brands fa-youtube"></i> YouTube</span>
+                        <span class="flex items-center gap-1.5 text-xs"><i class="fa-brands fa-spotify"></i> Spotify</span>
+                        <span class="flex items-center gap-1.5 text-xs"><i class="fa-solid fa-music"></i> JioSaavn</span>
+                        <span class="flex items-center gap-1.5 text-xs"><i class="fa-solid fa-headphones"></i> Gaana</span>
+                        <span class="flex items-center gap-1.5 text-xs"><i class="fa-brands fa-soundcloud"></i> SoundCloud</span>
+                        <span class="flex items-center gap-1.5 text-xs"><i class="fa-solid fa-wave-square"></i> Audiomack</span>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer id="footer" class="px-4 py-6 text-center">
+            <p class="text-xs opacity-40 max-w-lg mx-auto leading-relaxed">
+                This tool is for educational/personal use. Respect copyright laws and platform Terms of Service.
+                <br>CORS proxies are third-party services and may be rate-limited.
+            </p>
+        </footer>
+
+        <!-- Theme Name Label -->
+        <div id="theme-label" class="fixed bottom-4 left-4 z-50 text-xs font-medium opacity-0 pointer-events-none uppercase tracking-widest"></div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="js/themes.js"></script>
+    <script src="js/particles.js"></script>
+    <script src="js/ffmpeg-loader.js"></script>
+    <script src="js/resolvers.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

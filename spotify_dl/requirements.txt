@@ -1,0 +1,12 @@
+# Spotify Download Dependencies
+# Core - for track metadata and downloads
+spotipy>=2.21.0
+mutagen>=1.45.0
+
+# Optional - for direct Spotify downloads (requires librespot)
+# Install separately: pip install librespot
+
+# Alternative download tools (install separately)
+# pip install spotify-dl
+# pip install spotdl
+# brew install yt-dlp (or pip install yt-dlp)

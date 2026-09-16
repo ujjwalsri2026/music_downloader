@@ -1,0 +1,218 @@
+/* ═══════════════════════════════════════════════════════════════
+   ANIMATIONS.CSS — Keyframes, Utilities, Equalizer Bars
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Gradient Mesh (Glassmorphism) */
+@keyframes gradientMesh {
+    0% { background-position: 0% 50%; }
+    25% { background-position: 100% 50%; }
+    50% { background-position: 100% 0%; }
+    75% { background-position: 0% 100%; }
+    100% { background-position: 0% 50%; }
+}
+
+/* Float Spin (Mid-Century shapes) */
+@keyframes floatSpin {
+    from { transform: rotate(0deg) translateY(0); }
+    to { transform: rotate(360deg) translateY(0); }
+}
+
+/* Equalizer Bars */
+.eq-bar {
+    height: 8px;
+    animation: equalize 0.8s ease-in-out infinite alternate;
+}
+
+.eq-bar:nth-child(1) { animation-delay: 0s; height: 12px; }
+.eq-bar:nth-child(2) { animation-delay: 0.1s; height: 20px; }
+.eq-bar:nth-child(3) { animation-delay: 0.2s; height: 16px; }
+.eq-bar:nth-child(4) { animation-delay: 0.15s; height: 24px; }
+.eq-bar:nth-child(5) { animation-delay: 0.05s; height: 14px; }
+
+@keyframes equalize {
+    0% { height: 6px; }
+    100% { height: 28px; }
+}
+
+/* Pulse (Bauhaus shapes) */
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+}
+
+/* Float (Memphis decorations) */
+@keyframes float {
+    0%, 100% { transform: translateY(0) rotate(0deg); }
+    33% { transform: translateY(-8px) rotate(3deg); }
+    66% { transform: translateY(4px) rotate(-2deg); }
+}
+
+/* Shake (Error) */
+@keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-10px); }
+    40% { transform: translateX(10px); }
+    60% { transform: translateX(-10px); }
+    80% { transform: translateX(10px); }
+}
+
+.shake {
+    animation: shake 0.5s ease-in-out;
+}
+
+/* Fade In Up */
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.fade-in-up {
+    animation: fadeInUp 0.6s ease forwards;
+}
+
+/* Fade Out Down */
+@keyframes fadeOutDown {
+    from {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    to {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+}
+
+.fade-out-down {
+    animation: fadeOutDown 0.4s ease forwards;
+}
+
+/* Scale In */
+@keyframes scaleIn {
+    from {
+        opacity: 0;
+        transform: scale(0.9);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.scale-in {
+    animation: scaleIn 0.5s ease forwards;
+}
+
+/* Shimmer (Loading) */
+@keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.shimmer {
+    background: linear-gradient(90deg, transparent 25%, rgba(255,255,255,0.1) 50%, transparent 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+}
+
+/* Gold Line (Luxury) */
+@keyframes goldLineSlide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+/* Spin (Utility) */
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.spin {
+    animation: spin 1s linear infinite;
+}
+
+/* Progress Bar Glow */
+@keyframes progressGlow {
+    0%, 100% { box-shadow: 0 0 5px rgba(255,255,255,0.2); }
+    50% { box-shadow: 0 0 15px rgba(255,255,255,0.4); }
+}
+
+/* Platform Icon Bounce */
+@keyframes iconBounce {
+    0%, 100% { transform: translateY(-50%) scale(1); }
+    50% { transform: translateY(-50%) scale(1.2); }
+}
+
+.icon-bounce {
+    animation: iconBounce 0.3s ease;
+}
+
+/* Memphis Decorative Floating */
+@keyframes memphisFloat1 {
+    0%, 100% { transform: translate(0, 0) rotate(0deg); }
+    25% { transform: translate(5px, -10px) rotate(10deg); }
+    50% { transform: translate(-3px, 5px) rotate(-5deg); }
+    75% { transform: translate(7px, 3px) rotate(8deg); }
+}
+
+@keyframes memphisFloat2 {
+    0%, 100% { transform: translate(0, 0) rotate(0deg); }
+    25% { transform: translate(-8px, 5px) rotate(-15deg); }
+    50% { transform: translate(4px, -8px) rotate(10deg); }
+    75% { transform: translate(-2px, 10px) rotate(-8deg); }
+}
+
+@keyframes memphisFloat3 {
+    0%, 100% { transform: translate(0, 0) rotate(0deg); }
+    33% { transform: translate(10px, -5px) rotate(20deg); }
+    66% { transform: translate(-5px, 8px) rotate(-12deg); }
+}
+
+/* Bauhaus Shape Pulse */
+@keyframes bauhausPulse {
+    0%, 100% { transform: scale(1); opacity: 0.15; }
+    50% { transform: scale(1.1); opacity: 0.2; }
+}
+
+/* Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+    .eq-bar,
+    .shake,
+    .fade-in-up,
+    .fade-out-down,
+    .scale-in,
+    .shimmer,
+    .spin,
+    .icon-bounce {
+        animation: none !important;
+    }
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+    width: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.3);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(128, 128, 128, 0.5);
+}
+
+/* Selection */
+::selection {
+    background: rgba(201, 169, 110, 0.3);
+    color: inherit;
+}
