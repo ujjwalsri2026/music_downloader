@@ -1,43 +1,12 @@
 /* ═══════════════════════════════════════════════════════════════
    RESOLVERS.JS — Platform-Specific URL Resolution
    ═══════════════════════════════════════════════════════════════ */
-
+ 
 const Resolvers = (() => {
     const CORS_PROXIES = [
         'https://api.allorigins.win/raw?url=',
         'https://corsproxy.io/?'
     ];
-    const SPOTIFY_DAEMON_URL = 'http://127.0.0.1:54321';
-
-    // ─── SPOTIFY DAEMON COMMUNICATION ───
-    async function checkDaemonStatus() {
-        try {
-            const response = await fetch(`${SPOTIFY_DAEMON_URL}/api/status`, {
-                signal: AbortSignal.timeout(2000)
-            });
-            return await response.json();
-        } catch (e) {
-            return null;
-        }
-    }
-
-    async function requestDaemonDownload(trackId, quality = 'high') {
-        const response = await fetch(`${SPOTIFY_DAEMON_URL}/api/download`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ track_id: trackId, quality })
-        });
-        return await response.json();
-    }
-
-    async function requestDaemonAuth(method = 'anonymous', credentials = {}) {
-        const response = await fetch(`${SPOTIFY_DAEMON_URL}/api/auth`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ method, ...credentials })
-        });
-        return await response.json();
-    }
 
     // ─── CORS-PROXIED FETCH ───
     async function proxyFetch(url, options = {}) {
@@ -126,12 +95,20 @@ const Resolvers = (() => {
         try {
             const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
             const oembed = await proxyFetchJSON(oembedUrl);
-            metadata.title = oembed.title || metadata.title;
-            metadata.artist = oembed.author_name || metadata.artist;
-            metadata.thumbnail = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+            if (oembed.title && oembed.title !== 'Watch on YouTube') {
+                metadata.title = oembed.title;
+            }
+            if (oembed.author_name) {
+                metadata.artist = oembed.author_name;
+            }
+            if (oembed.thumbnail_url) {
+                metadata.thumbnail = oembed.thumbnail_url;
+            } else {
+                metadata.thumbnail = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+            }
         } catch (e) {
             console.warn('oEmbed failed:', e);
-            metadata.thumbnail = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+            // Keep default metadata - user will see "Unknown Title"
         }
 
         // Try youtubei.js for audio stream
@@ -145,9 +122,11 @@ const Resolvers = (() => {
                     const script = document.createElement('script');
                     script.src = 'https://cdn.jsdelivr.net/npm/youtubei.js@9/dist/umd.min.js';
                     script.onload = resolve;
-                    script.onerror = reject;
+                    script.onerror = () => { console.warn('youtubei.js script load failed'); };
                     document.head.appendChild(script);
                 });
+                // Wait for script to load
+                await new Promise(resolve => setTimeout(resolve, 1500));
             }
 
             const yt = await Innertube.create({ client: 'WEB' });
@@ -164,8 +143,14 @@ const Resolvers = (() => {
 
             // Update metadata from video info
             if (info.basic_info) {
-                metadata.title = info.basic_info.title || metadata.title;
-                metadata.artist = info.basic_info.channel?.name || info.basic_info.author || metadata.artist;
+                if (info.basic_info.title && info.basic_info.title !== 'Watch on YouTube') {
+                    metadata.title = info.basic_info.title;
+                }
+                if (info.basic_info.channel?.name) {
+                    metadata.artist = info.basic_info.channel.name;
+                } else if (info.basic_info.author) {
+                    metadata.artist = info.basic_info.author;
+                }
                 if (info.basic_info.duration) {
                     metadata.duration = formatDuration(info.basic_info.duration);
                 }
@@ -175,24 +160,48 @@ const Resolvers = (() => {
             }
         } catch (e) {
             console.warn('youtubei.js failed:', e);
+            // Continue with oEmbed metadata only - this is expected
         }
 
-        if (!streamUrl) {
-            // Can't get audio stream — inform the user
-            throw new Error(
-                `Found: "${metadata.title}" by ${metadata.artist}\n\n` +
-                'Direct YouTube audio download requires the Innertube API which may be blocked by CORS. ' +
-                'Try pasting a JioSaavn or Spotify link instead for direct MP3 downloads.'
-            );
+        // Determine if we have valid metadata
+        const titleValid = metadata.title && metadata.title !== 'Watch on YouTube' && metadata.title !== 'Unknown Title';
+        const artistValid = metadata.artist && metadata.artist !== 'Unknown Artist';
+
+        if (titleValid || artistValid) {
+            // We have some metadata - return what we have
+            const result = {
+                title: metadata.title,
+                artist: metadata.artist,
+                thumbnail: metadata.thumbnail,
+                streamUrl,
+                audioFormat,
+                platform: 'youtube',
+                needsConversion: audioFormat !== 'audio/mpeg',
+                sourceFormat: audioFormat.includes('webm') ? 'webm' : 'm4a'
+            };
+            
+            // Add note if direct download not available
+            if (!streamUrl) {
+                result.downloadNote = 'Direct YouTube download requires the Innertube API. ' +
+                    'Metadata extracted via oEmbed. Try JioSaavn or Spotify for direct MP3 download.';
+            }
+            
+            return result;
         }
 
+        // If no valid metadata at all, return what we have with download note
         return {
-            ...metadata,
-            streamUrl,
-            audioFormat,
+            title: metadata.title,
+            artist: metadata.artist,
+            thumbnail: metadata.thumbnail,
+            streamUrl: null,
+            audioFormat: 'audio/mpeg',
             platform: 'youtube',
-            needsConversion: audioFormat !== 'audio/mpeg',
-            sourceFormat: audioFormat.includes('webm') ? 'webm' : 'm4a'
+            needsConversion: false,
+            sourceFormat: 'm4a',
+            downloadNote: 'Could not extract YouTube audio stream. ' +
+                'Video metadata was extracted via oEmbed API. ' +
+                'For direct MP3 download, try a JioSaavn or Spotify link.'
         };
     }
 
@@ -266,42 +275,51 @@ const Resolvers = (() => {
         try {
             const searchQuery = `${metadata.artist} ${metadata.title} audio`;
             const ytResult = await resolveYouTube(`https://www.youtube.com/results?search_query=${encodeURIComponent(searchQuery)}`);
-            return {
-                ...ytResult,
-                title: metadata.title,
-                artist: metadata.artist,
-                platform: 'spotify',
-                originalPlatform: 'spotify',
-                foundOn: 'YouTube'
-            };
-        } catch (e) {
-            // Try JioSaavn search
-            try {
-                const jioResult = await searchJioSaavn(metadata.title, metadata.artist);
+            // If resolveYouTube returned with a downloadNote, we still use it
+            if (ytResult) {
                 return {
-                    ...jioResult,
+                    title: ytResult.title || metadata.title,
+                    artist: ytResult.artist || metadata.artist,
+                    thumbnail: ytResult thumbnail || metadata.thumbnail,
+                    streamUrl: ytResult.streamUrl,
+                    audioFormat: ytResult.audioFormat || 'audio/ogg',
                     platform: 'spotify',
                     originalPlatform: 'spotify',
-                    foundOn: 'JioSaavn'
+                    foundOn: ytResult.downloadNote ? 'YouTube (metadata only)' : 'YouTube'
                 };
-            } catch (e2) {
-                // If daemon is available, show error about daemon
-                if (daemonStatus && daemonStatus.status === 'running') {
-                    throw new Error(
-                        `Found "${metadata.title}" by ${metadata.artist} on Spotify.\n\n` +
-                        `The Spotify daemon is running but failed to download the track.\n` +
-                        `Check the daemon terminal for errors.`
-                    );
-                }
-                throw new Error(
-                    `Found "${metadata.title}" by ${metadata.artist} on Spotify, ` +
-                    `but couldn't find it for download.\n\n` +
-                    `For direct Spotify downloads, run the Spotify daemon:\n` +
-                    `python spotify_dl/daemon.py\n\n` +
-                    `Or try a YouTube or JioSaavn link instead.`
-                );
             }
+        } catch (e) {
+            console.warn('YouTube fallback failed:', e);
         }
+
+        // Try JioSaavn search
+        try {
+            const jioResult = await searchJioSaavn(metadata.title, metadata.artist);
+            return {
+                ...jioResult,
+                platform: 'spotify',
+                originalPlatform: 'spotify',
+                foundOn: 'JioSaavn'
+            };
+        } catch (e) {
+            console.warn('JioSaavn search failed:', e);
+        }
+
+        // If daemon is available, show error; otherwise generic error
+        if (daemonStatus && daemonStatus.status === 'running') {
+            throw new Error(
+                `Found "${metadata.title}" by ${metadata.artist} on Spotify.\n\n` +
+                `The Spotify daemon is running but failed to download the track.\n` +
+                `Check the daemon terminal for errors.`
+            );
+        }
+        throw new Error(
+            `Found "${metadata.title}" by ${metadata.artist} on Spotify, ` +
+            `but couldn't find it for download.\n\n` +
+            `For direct Spotify downloads, run the Spotify daemon:\n` +
+            `python spotify_dl/daemon.py\n\n` +
+            `Or try a YouTube or JioSaavn link instead.`
+        );
     }
 
     // ─── JIOSAAVN RESOLVER ───
@@ -663,10 +681,6 @@ const Resolvers = (() => {
         extractSpotifyId,
         extractJioSaavnId,
         extractGaanaId,
-        formatDuration,
-        checkDaemonStatus,
-        requestDaemonAuth,
-        requestDaemonDownload,
-        SPOTIFY_DAEMON_URL
+        formatDuration
     };
 })();

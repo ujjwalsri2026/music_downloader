@@ -367,6 +367,17 @@ const App = (() => {
         els.progressContainer.classList.add('hidden');
         els.progressBar.style.width = '0%';
 
+        // Show any download note (e.g., for YouTube metadata-only results)
+        if (result.downloadNote) {
+            const noteEl = document.createElement('div');
+            noteEl.className = 'download-note text-xs opacity-70 mt-2';
+            noteEl.textContent = result.downloadNote;
+            // Remove existing note if present
+            const existingNote = els.resultCard.querySelector('.download-note');
+            if (existingNote) existingNote.remove();
+            els.resultCard.querySelector('.meta-info').appendChild(noteEl);
+        }
+
         // Show result
         els.resultState.classList.remove('hidden');
         els.errorState.classList.add('hidden');
