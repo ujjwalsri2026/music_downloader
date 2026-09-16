@@ -280,7 +280,7 @@ const Resolvers = (() => {
                 return {
                     title: ytResult.title || metadata.title,
                     artist: ytResult.artist || metadata.artist,
-                    thumbnail: ytResult thumbnail || metadata.thumbnail,
+                    thumbnail: ytResult.thumbnail || metadata.thumbnail,
                     streamUrl: ytResult.streamUrl,
                     audioFormat: ytResult.audioFormat || 'audio/ogg',
                     platform: 'spotify',
@@ -672,7 +672,7 @@ const Resolvers = (() => {
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     }
 
-    return {
+    const windowResolvers = {
         resolve,
         detectPlatform,
         getPlatformIcon,
@@ -683,4 +683,6 @@ const Resolvers = (() => {
         extractGaanaId,
         formatDuration
     };
+    window.Resolvers = windowResolvers;
+    return windowResolvers;
 })();
