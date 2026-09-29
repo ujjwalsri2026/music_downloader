@@ -85,27 +85,38 @@ const FFmpegLoader = (() => {
         const inputName = 'input_audio';
         const outputName = 'output.mp3';
 
-        // Write input file
-        const inputData = new Uint8Array(await inputBlob.arrayBuffer());
-        await ffmpeg.writeFile(inputName, inputData);
+        // ffmpeg's 'progress' event is global to the instance, so route it to
+        // whichever conversion is currently running.
+        const report = typeof onProgress === 'function' ? onProgress : null;
+        const onProgressEvent = ({ progress }) => {
+            if (report) report(progress);
+        };
+        ffmpeg.on('progress', onProgressEvent);
 
-        // Convert to MP3
-        await ffmpeg.exec([
-            '-i', inputName,
-            '-codec:a', 'libmp3lame',
-            '-b:a', '192k',
-            '-q:a', '2',
-            outputName
-        ]);
+        try {
+            const inputData = new Uint8Array(await inputBlob.arrayBuffer());
+            await ffmpeg.writeFile(inputName, inputData);
 
-        // Read output
-        const outputData = await ffmpeg.readFile(outputName);
+            await ffmpeg.exec([
+                '-i', inputName,
+                '-codec:a', 'libmp3lame',
+                '-b:a', '192k',
+                '-q:a', '2',
+                outputName
+            ]);
 
-        // Clean up
-        await ffmpeg.deleteFile(inputName);
-        await ffmpeg.deleteFile(outputName);
-
-        return new Blob([outputData.buffer], { type: 'audio/mpeg' });
+            const outputData = await ffmpeg.readFile(outputName);
+            return new Blob([outputData.buffer], { type: 'audio/mpeg' });
+        } finally {
+            ffmpeg.off('progress', onProgressEvent);
+            // Best-effort cleanup; a failure here must not mask a real error.
+            try {
+                await ffmpeg.deleteFile(inputName);
+            } catch (_) { /* not written */ }
+            try {
+                await ffmpeg.deleteFile(outputName);
+            } catch (_) { /* not written */ }
+        }
     }
 
     function isLoaded() {

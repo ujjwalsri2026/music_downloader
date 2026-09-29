@@ -1,17 +1,17 @@
 # MusicGrab - Free Music Downloader
 
-A 100% browser-based music downloader that resolves direct audio URLs from YouTube, Spotify, JioSaavn, Gaana, SoundCloud, and Audiomack. No backend server required.
+A browser-based music downloader that resolves direct audio URLs from YouTube, Spotify, JioSaavn, Gaana, SoundCloud, and Audiomack. Most platforms work with no backend at all; Spotify requires an optional local Python daemon.
 
 ## Features
 
-- **No backend** — All logic runs client-side in the browser
+- **No backend for most platforms** — YouTube, JioSaavn, Gaana, SoundCloud, Audiomack resolve client-side
+- **Optional local daemon** — enables Spotify URL downloads
 - **Multi-platform** — YouTube, Spotify, JioSaavn, Gaana, SoundCloud, Audiomack
-- **Smart detection** — Auto-detects platform from URL
+- **Smart detection** — auto-detects platform from URL
 - **Theme system** — 5 animated themes that cycle automatically
-- **Progress tracking** — Real-time download progress with chunked reading
+- **Progress tracking** — real-time download progress with chunked reading
 - **MP3 conversion** — ffmpeg.wasm for M4A/WebM to MP3 conversion
-- **Mobile responsive** — Works on all screen sizes
-- **Spotify support** — Direct download via local Python daemon (AES-128-CTR decryption)
+- **Mobile responsive** — works on all screen sizes
 
 ## Supported Platforms
 
@@ -19,82 +19,109 @@ A 100% browser-based music downloader that resolves direct audio URLs from YouTu
 |----------|-------------------|--------------|
 | YouTube | youtubei.js (Innertube) | M4A/WebM |
 | YouTube Music | youtubei.js (Innertube) | M4A/WebM |
-| **Spotify** | **Local Python daemon (librespot)** | **OGG Vorbis** |
+| **Spotify** | **Local Python daemon (spotdl)** | **MP3 (or requested format)** |
 | JioSaavn | Internal API | MP3 (320kbps) |
 | Gaana | Page scraping | MP3/M4A |
 | SoundCloud | Page scraping | MP3 |
 | Audiomack | Page scraping | MP3 |
 
+> **Note on Spotify:** the daemon does not speak Spotify's audio protocol. It
+> hands the Spotify URL to `spotdl`, which matches the track and downloads the
+> audio. The UI labels the result with the tool that actually produced it so the
+> source is never misrepresented.
+
 ## Quick Start (Browser Only)
 
-1. Open `index.html` in a browser
+1. Open `index.html` in a browser (or serve the folder)
 2. Paste a music URL
 3. Click "Fetch"
 4. Click "Download MP3"
 
-## Spotify Direct Download (Requires Python)
+## Spotify Downloads (Requires Python)
 
-For direct Spotify downloads, run the local Python daemon:
-
-### Prerequisites
-
-- Python 3.8+
-- pip (Python package manager)
+Spotify URLs are resolved by an optional local daemon.
 
 ### Setup
 
 ```bash
-# Navigate to spotify_dl directory
 cd spotify_dl
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Start the daemon
-python daemon.py
+pip install -r requirements.txt   # installs spotdl + yt-dlp
+./start.sh                        # macOS/Linux
+# or: start.bat                   # Windows
 ```
 
-### Using the CLI
+The daemon listens on `http://127.0.0.1:54321` by default. If no daemon is
+running, the frontend automatically falls back to searching the track by
+title/artist instead of failing.
+
+To use a different port, start the daemon with `--port` and tell the page about
+it with a `?daemon=` query parameter:
 
 ```bash
-# Download a single track
-python main.py "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
-
-# Download with specific quality
-python main.py -q very_high "spotify:track:4uLU6hMCjMI75M1A2tKUQC"
-
-# Download to specific directory
-python main.py -o ./music "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
-
-# Run as daemon (for browser integration)
-python daemon.py --port 54321
+python daemon.py --port 1234
+# then open:  index.html?daemon=1234
 ```
 
-### How It Works
+The port is also remembered if you set it once in the browser console:
 
-1. **Browser** identifies Spotify track and sends track ID to local daemon
-2. **Daemon** authenticates with Spotify (via librespot)
-3. **Daemon** fetches encrypted audio stream
-4. **Daemon** decrypts using AES-128-CTR with session key
-5. **Browser** receives decrypted OGG audio and triggers download
+```js
+localStorage.setItem('musicgrab.daemonPort', '1234');
+```
 
-### Spotify Encryption Details
+ffmpeg is optional but recommended — without it, audio that is not already MP3 is
+kept in its original format rather than converted.
 
-Spotify encrypts audio using:
-- **Algorithm:** AES-128-CTR
-- **Key:** First 16 bytes of session key
-- **IV:** Next 16 bytes of session key, XOR'd with chunk counter
-- **Chunks:** ~320KB blocks, each with incrementing counter
+```bash
+brew install ffmpeg              # macOS
+sudo apt install ffmpeg          # Debian/Ubuntu
+choco install ffmpeg             # Windows
+```
 
-The daemon handles all key exchange and decryption automatically.
+### Daemon options
+
+```bash
+python daemon.py --port 54321                        # custom port
+python daemon.py --allow-origin https://example.com  # extra CORS origin
+```
+
+By default the daemon only accepts browser requests from `*.github.io`,
+`localhost`, and `127.0.0.1`. Requests from any other origin are refused.
+
+### CLI
+
+```bash
+python main.py "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+python main.py -o ./music -f mp3 "spotify:track:4uLU6hMCjMI75M1A2tKUQC"
+python main.py -q 160 "4uLU6hMCjMI75M1A2tKUQC"        # bare ID also works
+python main.py --install                              # install the tools
+```
+
+| Flag | Values | Default |
+|------|--------|---------|
+| `-o`, `--output` | any path | `./downloads` |
+| `-f`, `--format` | `mp3`, `ogg`, `m4a`, `opus` | `mp3` |
+| `-q`, `--quality` | `96`, `160`, `320` | `320` |
+
+### Daemon API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`  | `/api/status` | Liveness check |
+| `POST` | `/api/download` | `{"track_id": "<22-char id>", "format": "mp3"}` |
+| `GET`  | `/api/file/{id}/{name}` | Download a fetched file |
+| `HEAD` | `/api/file/{id}/{name}` | Probe a file (headers only) |
 
 ## Deployment (GitHub Pages)
 
 1. Push this folder to a GitHub repository
 2. Go to **Settings → Pages**
 3. Set **Source** to "Deploy from a branch"
-4. Select **main** branch, folder **/ (root)**
+4. Select `main` branch, folder `/ (root)`
 5. Your app will be available at `https://<username>.github.io/<repo-name>/`
+
+The included `deploy.yml` workflow publishes only the static assets
+(`index.html`, `css/`, `js/`, `assets/`). The Python daemon source and any local
+downloads are excluded.
 
 ## CORS Proxies
 
@@ -103,7 +130,8 @@ The app uses free public CORS proxies for cross-origin requests:
 - **Primary:** `https://api.allorigins.win/raw?url=`
 - **Fallback:** `https://corsproxy.io/?`
 
-These are third-party services and may be rate-limited.
+These are third-party services and may be rate-limited. Every proxied URL passes
+through them, so they can observe what you are downloading.
 
 ## Technical Stack
 
@@ -114,72 +142,77 @@ These are third-party services and may be rate-limited.
 - Font Awesome 6.5 (CDN)
 - Google Fonts (Inter, Playfair Display, Poppins, Montserrat)
 - ffmpeg.wasm 0.12 (lazy-loaded for MP3 conversion)
+- youtubei.js 9 (lazy-loaded for YouTube resolution)
 
-### Python (Spotify Daemon)
-- librespot (Spotify protocol implementation)
-- pycryptodome (AES-128-CTR decryption)
-- FastAPI/HTTP server (local REST API)
+### Python (Optional Local Daemon)
+- Python standard library `http.server` (threaded)
+- `spotdl` / `yt-dlp` (invoked as subprocesses)
+- `ffmpeg` (invoked for conversion)
 
 ## File Structure
 
 ```
 music_downloader/
 ├── index.html                 # Main web app
+├── .nojekyll
+├── .gitignore
 ├── css/
-│   ├── themes.css            # 5 animation themes
-│   └── animations.css        # Keyframes and utilities
+│   ├── themes.css             # 5 themes
+│   └── animations.css         # Keyframes and utilities
 ├── js/
-│   ├── app.js                # Main logic
-│   ├── resolvers.js          # Platform resolvers
-│   ├── themes.js             # Theme cycling
-│   ├── particles.js          # Particle systems
-│   └── ffmpeg-loader.js      # MP3 conversion
+│   ├── app.js                 # Main logic
+│   ├── resolvers.js           # Platform resolvers + daemon client
+│   ├── themes.js              # Theme cycling
+│   ├── particles.js           # Particle systems
+│   └── ffmpeg-loader.js       # MP3 conversion
 ├── spotify_dl/
-│   ├── daemon.py             # Local HTTP server
-│   ├── decryptor.py          # AES-128-CTR decryption
-│   ├── spotify_auth.py       # Spotify authentication
-│   ├── main.py               # CLI tool
-│   ├── requirements.txt      # Python dependencies
-│   ├── start.sh              # Linux/Mac launcher
-│   └── start.bat             # Windows launcher
+│   ├── daemon.py              # Local HTTP server
+│   ├── main.py                # CLI tool
+│   ├── requirements.txt
+│   ├── start.sh               # Linux/Mac launcher
+│   └── start.bat              # Windows launcher
 ├── assets/
 │   ├── favicon.svg
-│   └── patterns/             # SVG patterns
-├── .nojekyll
+│   └── patterns/              # SVG patterns
 └── README.md
 ```
 
 ## Known Limitations
 
-- CORS proxies are free services and may have downtime
-- YouTube audio streams are M4A/WebM; MP3 conversion requires ffmpeg.wasm (~25MB)
-- **Spotify** requires the local Python daemon for direct downloads
-- Some platforms may change their API endpoints
+- CORS proxies are free services and may be rate-limited or go down
+- YouTube audio is M4A/WebM; MP3 conversion requires ffmpeg.wasm (~25MB, lazy-loaded)
+- **Spotify** requires the local daemon; without it the app falls back to a
+  title/artist search
+- YouTube and SoundCloud frequently block direct cross-origin fetches, so those
+  downloads depend on the CORS proxies
+- Some platforms may change their API endpoints or page structure
 
 ## Troubleshooting
 
-### Spotify Download Not Working
+### Spotify download not working
 
-1. Ensure Python daemon is running: `python spotify_dl/daemon.py`
-2. Check daemon status: `curl http://127.0.0.1:54321/api/status`
+1. Start the daemon: `./start.sh` (or `python spotify_dl/daemon.py`)
+2. Check it responds: `curl http://127.0.0.1:54321/api/status`
 3. Install dependencies: `pip install -r spotify_dl/requirements.txt`
+4. If you changed the port, open the page with `?daemon=<port>`
 
-### librespot Installation Issues
+If the daemon is running but the browser shows a CORS error, your page origin is
+not in the allowlist — start the daemon with `--allow-origin <your-origin>`.
 
-librespot requires Rust toolchain. If installation fails:
+Note that `spotdl` changed its quality flag between major versions (3.x used
+`--quality`, 4.x uses `--bitrate`). The CLI detects the installed version and
+uses the right one, so `-q` works on both.
+
+### Downloads always fail
+
 ```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Then install librespot
-pip install librespot
+spotdl --version     # should print a version
+yt-dlp --version
+ffmpeg -version
 ```
 
-### Anonymous Mode Limitations
-
-Anonymous sessions are limited to 96kbps OGG quality. For higher quality:
-- Use Spotify Premium credentials
-- Run: `python daemon.py --auth-method username_password --username YOUR_USER --password YOUR_PASS`
+If `spotdl` and `yt-dlp` both fail, the issue is usually network-related or the
+source is region-blocked.
 
 ## Legal Disclaimer
 

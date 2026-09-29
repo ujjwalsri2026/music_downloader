@@ -1,0 +1,30 @@
+# Spotify credentials — never commit
+credentials.json
+
+# Downloaded audio / local output
+downloads/
+*.ogg
+*.ogx
+*.opus
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Environment
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

@@ -48,8 +48,7 @@ const App = (() => {
     function bindEvents() {
         els.fetchBtn.addEventListener('click', handleFetch);
         els.urlInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleFetch();
-            if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) handleFetch();
+            if (e.key === 'Enter') handleFetch();
         });
         els.urlInput.addEventListener('input', handleInputChange);
         els.downloadBtn.addEventListener('click', handleDownload);
@@ -116,56 +115,62 @@ const App = (() => {
     }
 
     // ─── DOWNLOAD ───
+    let activeController = null;
+
     async function handleDownload() {
         if (!currentResult || isDownloading) return;
+        if (!currentResult.streamUrl) {
+            showError(currentResult.downloadNote ||
+                'No downloadable stream was found for this track.', { keepResult: true });
+            return;
+        }
 
         isDownloading = true;
         els.downloadBtn.disabled = true;
+        let audioBlob;
 
         try {
-            let audioBlob;
+            // needsProxy is only a hint about the best first attempt. Most
+            // audio CDNs omit CORS headers, so if the direct route fails we
+            // retry through a proxy rather than surfacing a CORS error.
+            audioBlob = await fetchWithFallback(currentResult);
 
-            if (currentResult.streamUrl) {
-                // Check if it's a JioSaavn CDN direct MP3 (saavncdn.com)
-                const isDirect = currentResult.streamUrl.includes('saavncdn.com') ||
-                                 currentResult.streamUrl.includes('.mp3') ||
-                                 !currentResult.needsConversion;
-
-                if (isDirect) {
-                    audioBlob = await fetchWithProgress(currentResult.streamUrl);
-                } else {
-                    // Fetch via CORS proxy
-                    audioBlob = await fetchWithProgressViaProxy(currentResult.streamUrl);
-                }
-
-                // Convert if needed and ffmpeg is available
-                if (currentResult.needsConversion && audioBlob) {
-                    const canConvert = await ensureFFmpeg();
-                    if (canConvert) {
-                        showProgress('Converting to MP3...', 0);
-                        try {
-                            audioBlob = await FFmpegLoader.convertToMP3(audioBlob, (progress) => {
-                                showProgress('Converting to MP3...', Math.round(progress * 100));
-                            });
-                        } catch (convErr) {
-                            console.warn('FFmpeg conversion failed:', convErr);
-                            showProgress('Download complete (raw format)', 100);
-                        }
-                    } else {
+            let converted = false;
+            if (currentResult.needsConversion && audioBlob) {
+                if (await ensureFFmpeg()) {
+                    showProgress('Converting to MP3...', 0);
+                    try {
+                        audioBlob = await FFmpegLoader.convertToMP3(audioBlob, (progress) => {
+                            // ffmpeg reports a time ratio that can exceed 1.
+                            const pct = Math.min(100, Math.max(0, Math.round(progress * 100)));
+                            showProgress('Converting to MP3...', pct);
+                        });
+                        converted = true;
+                    } catch (convErr) {
+                        console.warn('FFmpeg conversion failed:', convErr);
                         showProgress('Download complete (raw format)', 100);
                     }
-                }
-
-                // Trigger download
-                if (audioBlob) {
-                    triggerDownload(audioBlob);
+                } else {
+                    showProgress('Download complete (raw format)', 100);
                 }
             }
+
+            if (audioBlob) {
+                triggerDownload(audioBlob, converted);
+            }
         } catch (err) {
-            showError('Download failed: ' + (err.message || 'Unknown error'));
+            if (err.name === 'AbortError') {
+                hideProgress();
+                showError('Download cancelled.', { keepResult: true });
+            } else {
+                hideProgress();
+                showError('Download failed: ' + (err.message || 'Unknown error'),
+                          { keepResult: true });
+            }
         } finally {
             isDownloading = false;
             els.downloadBtn.disabled = false;
+            activeController = null;
         }
     }
 
@@ -184,11 +189,45 @@ const App = (() => {
     }
 
     // ─── FETCH WITH PROGRESS ───
+    async function fetchWithFallback(result) {
+        const url = result.streamUrl;
+        const order = result.needsProxy
+            ? [['proxy', fetchWithProgressViaProxy], ['direct', fetchWithProgress]]
+            : [['direct', fetchWithProgress], ['proxy', fetchWithProgressViaProxy]];
+
+        let lastError;
+        for (const [label, fetcher] of order) {
+            try {
+                return await fetcher(url);
+            } catch (err) {
+                if (err.name === 'AbortError') throw err;  // user cancelled
+                lastError = err;
+                console.warn(`${label} download failed:`, err.message);
+            }
+        }
+        throw new Error(
+            `Could not download the audio. Tried direct and via proxy. ${lastError?.message || ''}`.trim()
+        );
+    }
+
     async function fetchWithProgress(url) {
         showProgress('Downloading...', 0);
 
-        const response = await fetch(url);
+        const controller = new AbortController();
+        activeController = controller;
+
+        const response = await fetch(url, { signal: controller.signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const contentType = response.headers.get('content-type') || 'audio/mpeg';
+
+        if (!response.body) {
+            // No streaming body (e.g. opaque response) — fall back to a single read.
+            const buffer = await response.arrayBuffer();
+            showProgress('Downloading...', 100,
+                `${(buffer.byteLength / (1024 * 1024)).toFixed(1)} MB`);
+            return new Blob([buffer], { type: contentType });
+        }
 
         const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
         const reader = response.body.getReader();
@@ -202,18 +241,17 @@ const App = (() => {
             chunks.push(value);
             received += value.length;
 
+            const mbReceived = (received / (1024 * 1024)).toFixed(1);
             if (contentLength > 0) {
-                const percent = Math.round((received / contentLength) * 100);
-                const mbReceived = (received / (1024 * 1024)).toFixed(1);
+                const percent = Math.min(100, Math.round((received / contentLength) * 100));
                 const mbTotal = (contentLength / (1024 * 1024)).toFixed(1);
                 showProgress('Downloading...', percent, `${mbReceived} MB / ${mbTotal} MB`);
             } else {
-                const mbReceived = (received / (1024 * 1024)).toFixed(1);
                 showProgress('Downloading...', -1, `${mbReceived} MB`);
             }
         }
 
-        return new Blob(chunks, { type: response.headers.get('content-type') || 'audio/mpeg' });
+        return new Blob(chunks, { type: contentType });
     }
 
     async function fetchWithProgressViaProxy(url) {
@@ -242,18 +280,32 @@ const App = (() => {
         els.progressContainer.classList.remove('hidden');
         els.progressLabel.textContent = label;
         if (percent >= 0) {
+            els.progressBar.classList.remove('progress-indeterminate');
             els.progressBar.style.width = percent + '%';
             els.progressPercent.textContent = percent + '%';
         } else {
-            els.progressBar.style.width = '100%';
+            // No content-length: sweep instead of claiming a fake percentage.
+            els.progressBar.classList.add('progress-indeterminate');
+            els.progressBar.style.width = '40%';
             els.progressPercent.textContent = '';
         }
         if (sizeText) els.progressSize.textContent = sizeText;
     }
 
+    function hideProgress() {
+        els.progressContainer.classList.add('hidden');
+        els.progressBar.classList.remove('progress-indeterminate');
+        els.progressBar.style.width = '0%';
+        els.progressPercent.textContent = '0%';
+        els.progressSize.textContent = '';
+    }
+
     // ─── TRIGGER DOWNLOAD ───
-    function triggerDownload(blob) {
-        const filename = sanitizeFilename(`${currentResult.title} - ${currentResult.artist}.mp3`);
+    function triggerDownload(blob, converted) {
+        // Only label the file .mp3 when ffmpeg actually produced an MP3 —
+        // otherwise keep the source extension the resolver reported.
+        const ext = converted ? 'mp3' : (currentResult.sourceFormat || 'mp3');
+        const filename = sanitizeFilename(`${currentResult.title} - ${currentResult.artist}.${ext}`);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -320,10 +372,13 @@ const App = (() => {
         els.loadingState.classList.add('hidden');
     }
 
-    function showError(message) {
+    function showError(message, options = {}) {
+        // A download failure should not destroy the result the user just
+        // fetched — they need it to retry or copy the link.
+        const keepResult = options.keepResult === true;
         els.errorMessage.textContent = message;
         els.errorState.classList.remove('hidden');
-        els.resultState.classList.add('hidden');
+        if (!keepResult) els.resultState.classList.add('hidden');
         els.loadingState.classList.add('hidden');
 
         shakeElement(els.errorCard);
@@ -364,8 +419,7 @@ const App = (() => {
         }
 
         // Reset progress
-        els.progressContainer.classList.add('hidden');
-        els.progressBar.style.width = '0%';
+        hideProgress();
 
         // Show any download note (e.g., for YouTube metadata-only results)
         if (result.downloadNote) {

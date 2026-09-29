@@ -142,6 +142,17 @@
     50% { box-shadow: 0 0 15px rgba(255,255,255,0.4); }
 }
 
+/* Indeterminate progress (server sent no content-length) */
+@keyframes progressSweep {
+    0%   { margin-left: -40%; width: 40%; }
+    100% { margin-left: 100%; width: 40%; }
+}
+
+.progress-indeterminate {
+    animation: progressSweep 1.2s ease-in-out infinite;
+    transition: none !important;
+}
+
 /* Platform Icon Bounce */
 @keyframes iconBounce {
     0%, 100% { transform: translateY(-50%) scale(1); }
@@ -188,6 +199,7 @@
     .scale-in,
     .shimmer,
     .spin,
+    .progress-indeterminate,
     .icon-bounce {
         animation: none !important;
     }

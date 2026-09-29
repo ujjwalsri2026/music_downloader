@@ -8,6 +8,98 @@ const Resolvers = (() => {
         'https://corsproxy.io/?'
     ];
 
+    const DEFAULT_DAEMON_PORT = 54321;
+    const DAEMON_TIMEOUT_MS = 2000;
+    const TRACK_ID_RE = /^[A-Za-z0-9]{22}$/;
+
+    // ─── LOCAL DAEMON CLIENT ───
+    // The daemon is optional; every call resolves to null on any failure so a
+    // missing daemon degrades to the browser-only path instead of throwing.
+    function daemonBase() {
+        let port = DEFAULT_DAEMON_PORT;
+        try {
+            // Set ?daemon=1234 (or localStorage) when running the daemon on a
+            // non-default port, e.g. `python daemon.py --port 1234`.
+            const fromQuery = new URLSearchParams(location.search).get('daemon');
+            if (fromQuery && /^\d{2,5}$/.test(fromQuery)) {
+                port = parseInt(fromQuery, 10);
+            } else {
+                const stored = localStorage.getItem('musicgrab.daemonPort');
+                if (stored && /^\d{2,5}$/.test(stored)) port = parseInt(stored, 10);
+            }
+        } catch (e) {
+            // localStorage can throw in private mode; fall back to the default.
+        }
+        return `http://127.0.0.1:${port}`;
+    }
+
+    async function daemonFetch(path, options = {}) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), DAEMON_TIMEOUT_MS);
+        try {
+            const response = await fetch(daemonBase() + path, {
+                ...options,
+                signal: controller.signal
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return await response.json();
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    async function checkDaemonStatus() {
+        try {
+            return await daemonFetch('/api/status');
+        } catch (err) {
+            console.warn('Spotify daemon not reachable:', err.message);
+            return null;
+        }
+    }
+
+    async function requestDaemonDownload(trackId, format = 'mp3') {
+        if (!TRACK_ID_RE.test(trackId)) {
+            throw new Error(`Invalid Spotify track ID: ${trackId}`);
+        }
+        return await daemonFetch('/api/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_id: trackId, format })
+        });
+    }
+
+    // ─── RESULT NORMALISATION ───
+    // Every resolver returns the same shape so callers never have to guess
+    // whether a field is present.
+    //
+    // needsProxy is only a HINT about the best first attempt. The downloader
+    // tries the hinted route and falls back to the other, so getting the hint
+    // wrong costs one extra round trip rather than a failed download. Hosts
+    // differ in whether they send CORS headers and that changes over time, so
+    // it is not something to hardcode here.
+    function normalize(result) {
+        const r = result || {};
+        const streamUrl = r.streamUrl || null;
+        const sourceFormat = r.sourceFormat || (streamUrl ? guessFormat(streamUrl) : 'mp3');
+        // GoogleVideo and similar streaming URLs are never directly fetchable.
+        const needsProxy = r.needsProxy !== undefined
+            ? r.needsProxy === true
+            : (streamUrl !== null && r.needsConversion === true);
+
+        return {
+            ...r,
+            streamUrl,
+            sourceFormat,
+            needsConversion: r.needsConversion === true,
+            needsProxy
+        };
+    }
+
+    function guessFormat(url) {
+        const ext = (url.split('?')[0].split('#')[0].match(/\.([a-z0-9]{2,5})$/i) || [])[1];
+        return (ext || 'mp3').toLowerCase();
+    }
+
     // ─── CORS-PROXIED FETCH ───
     async function proxyFetch(url, options = {}) {
         let lastError;
@@ -74,6 +166,42 @@ const Resolvers = (() => {
     }
 
     // ─── YOUTUBE RESOLVER ───
+    const INNERTUBE_CDN = 'https://cdn.jsdelivr.net/npm/youtubei.js@9/dist/umd.min.js';
+    const SCRIPT_LOAD_TIMEOUT_MS = 10000;
+
+    function loadScript(src) {
+        return new Promise((resolve, reject) => {
+            const existing = document.querySelector(`script[data-src="${src}"]`);
+            if (existing) {
+                if (existing.dataset.loaded === 'true') return resolve();
+                existing.addEventListener('load', () => resolve());
+                existing.addEventListener('error', () => reject(new Error(`Failed to load ${src}`)));
+                return;
+            }
+
+            const script = document.createElement('script');
+            script.src = src;
+            script.dataset.src = src;
+            script.async = true;
+            script.addEventListener('load', () => {
+                script.dataset.loaded = 'true';
+                resolve();
+            });
+            // Must reject, otherwise a blocked CDN leaves this promise pending forever.
+            script.addEventListener('error', () => reject(new Error(`Failed to load ${src}`)));
+            document.head.appendChild(script);
+        });
+    }
+
+    function loadInnertube() {
+        return Promise.race([
+            loadScript(INNERTUBE_CDN),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('youtubei.js load timed out')), SCRIPT_LOAD_TIMEOUT_MS)
+            )
+        ]);
+    }
+
     function extractYouTubeId(url) {
         const patterns = [
             /(?:youtube\.com\/watch\?.*v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/|music\.youtube\.com\/watch\?.*v=)([a-zA-Z0-9_-]{11})/,
@@ -117,16 +245,7 @@ const Resolvers = (() => {
 
         try {
             if (typeof Innertube === 'undefined') {
-                // Load youtubei.js
-                await new Promise((resolve, reject) => {
-                    const script = document.createElement('script');
-                    script.src = 'https://cdn.jsdelivr.net/npm/youtubei.js@9/dist/umd.min.js';
-                    script.onload = resolve;
-                    script.onerror = () => { console.warn('youtubei.js script load failed'); };
-                    document.head.appendChild(script);
-                });
-                // Wait for script to load
-                await new Promise(resolve => setTimeout(resolve, 1500));
+                await loadInnertube();
             }
 
             const yt = await Innertube.create({ client: 'WEB' });
@@ -136,8 +255,7 @@ const Resolvers = (() => {
             const format = info.chooseFormat({ type: 'audio', quality: 'best' });
 
             if (format) {
-                const stream = format.decipher(yt.session.player);
-                streamUrl = stream;
+                streamUrl = format.decipher(yt.session.player);
                 audioFormat = format.mimeType?.includes('webm') ? 'audio/webm' : 'audio/mp4';
             }
 
@@ -239,60 +357,35 @@ const Resolvers = (() => {
             console.warn('Spotify oEmbed failed:', e);
         }
 
-        // Check if Spotify daemon is running
+        // Prefer the local daemon, which can download straight from a Spotify URL.
         const daemonStatus = await checkDaemonStatus();
         if (daemonStatus && daemonStatus.status === 'running') {
-            // Use local daemon for direct Spotify download
             try {
-                // Ensure daemon is authenticated
-                if (!daemonStatus.authenticated) {
-                    await requestDaemonAuth('anonymous');
-                }
-
-                // Request download from daemon
-                const result = await requestDaemonDownload(trackId, 'high');
-                if (result.success) {
+                const result = await requestDaemonDownload(trackId, 'mp3');
+                if (result && result.success) {
+                    // Report the format the daemon actually produced rather than
+                    // assuming OGG — spotdl emits MP3 by default.
+                    const suffix = (result.source_format || guessFormat(result.download_url) || 'mp3').toLowerCase();
                     return {
                         title: metadata.title,
                         artist: metadata.artist,
                         thumbnail: metadata.thumbnail,
                         streamUrl: result.download_url,
-                        audioFormat: 'audio/ogg',
+                        sourceFormat: suffix,
+                        needsConversion: false,
+                        needsProxy: false,
                         platform: 'spotify',
                         originalPlatform: 'spotify',
-                        foundOn: 'Spotify (Local Daemon)',
-                        needsConversion: false,
-                        sourceFormat: 'ogg',
+                        foundOn: result.found_on || 'Spotify (local daemon)',
                         daemonDownload: true
                     };
                 }
             } catch (e) {
-                console.warn('Spotify daemon failed, falling back to YouTube:', e);
+                console.warn('Spotify daemon download failed, falling back:', e.message);
             }
         }
 
-        // Fallback: Search on YouTube for the track
-        try {
-            const searchQuery = `${metadata.artist} ${metadata.title} audio`;
-            const ytResult = await resolveYouTube(`https://www.youtube.com/results?search_query=${encodeURIComponent(searchQuery)}`);
-            // If resolveYouTube returned with a downloadNote, we still use it
-            if (ytResult) {
-                return {
-                    title: ytResult.title || metadata.title,
-                    artist: ytResult.artist || metadata.artist,
-                    thumbnail: ytResult.thumbnail || metadata.thumbnail,
-                    streamUrl: ytResult.streamUrl,
-                    audioFormat: ytResult.audioFormat || 'audio/ogg',
-                    platform: 'spotify',
-                    originalPlatform: 'spotify',
-                    foundOn: ytResult.downloadNote ? 'YouTube (metadata only)' : 'YouTube'
-                };
-            }
-        } catch (e) {
-            console.warn('YouTube fallback failed:', e);
-        }
-
-        // Try JioSaavn search
+        // Fallback: JioSaavn search by title/artist.
         try {
             const jioResult = await searchJioSaavn(metadata.title, metadata.artist);
             return {
@@ -305,20 +398,16 @@ const Resolvers = (() => {
             console.warn('JioSaavn search failed:', e);
         }
 
-        // If daemon is available, show error; otherwise generic error
         if (daemonStatus && daemonStatus.status === 'running') {
             throw new Error(
-                `Found "${metadata.title}" by ${metadata.artist} on Spotify.\n\n` +
-                `The Spotify daemon is running but failed to download the track.\n` +
-                `Check the daemon terminal for errors.`
+                `Found "${metadata.title}" by ${metadata.artist} on Spotify, but the ` +
+                `local daemon could not download it. Check the daemon terminal for errors.`
             );
         }
         throw new Error(
-            `Found "${metadata.title}" by ${metadata.artist} on Spotify, ` +
-            `but couldn't find it for download.\n\n` +
-            `For direct Spotify downloads, run the Spotify daemon:\n` +
-            `python spotify_dl/daemon.py\n\n` +
-            `Or try a YouTube or JioSaavn link instead.`
+            `Found "${metadata.title}" by ${metadata.artist} on Spotify, but couldn't ` +
+            `find a downloadable source.\n\nFor direct downloads, start the local daemon:\n` +
+            `python spotify_dl/daemon.py\n\nOr try a JioSaavn or YouTube link instead.`
         );
     }
 
@@ -646,22 +735,16 @@ const Resolvers = (() => {
     async function resolve(url) {
         const platform = detectPlatform(url);
 
-        switch (platform) {
-            case 'youtube':
-                return resolveYouTube(url);
-            case 'spotify':
-                return resolveSpotify(url);
-            case 'jiosaavn':
-                return resolveJioSaavn(url);
-            case 'gaana':
-                return resolveGaana(url);
-            case 'soundcloud':
-                return resolveSoundCloud(url);
-            case 'audiomack':
-                return resolveAudiomack(url);
-            default:
-                return resolveGeneric(url);
-        }
+        const dispatch = {
+            youtube: resolveYouTube,
+            spotify: resolveSpotify,
+            jiosaavn: resolveJioSaavn,
+            gaana: resolveGaana,
+            soundcloud: resolveSoundCloud,
+            audiomack: resolveAudiomack
+        }[platform] || resolveGeneric;
+
+        return normalize(await dispatch(url));
     }
 
     // ─── UTILITY ───

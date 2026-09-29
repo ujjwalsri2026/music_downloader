@@ -31,7 +31,14 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          # Static assets only. The Python daemon source and local downloads
+          # must not be published to the public site.
+          path: |
+            index.html
+            css/
+            js/
+            assets/
+            .nojekyll
 
       - name: Deploy to GitHub Pages
         id: deployment

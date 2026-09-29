@@ -2,8 +2,8 @@
 """
 main.py — Spotify Track Downloader CLI
 
-Uses spotify-dl (librespot under the hood) for actual downloads.
-Handles authentication, decryption, and conversion automatically.
+Resolves a Spotify track URL to audio using the external `spotdl` and `yt-dlp`
+tools, then optionally converts the result with ffmpeg.
 
 Usage:
     python main.py <spotify_url>
@@ -12,43 +12,47 @@ Usage:
 
 Options:
     --output, -o     Output directory (default: ./downloads)
-    --format, -f     Output format: ogg, mp3, m4a (default: ogg)
-    --quality, -q    Audio quality: 96, 160, 320 (default: 320)
+    --format, -f     Output format: mp3, ogg, m4a, opus (default: mp3)
+    --quality, -q    Audio quality in kbps: 96, 160, 320 (default: 320)
+    --install        Install the download tools and exit
 """
 
-import os
-import sys
-import re
-import json
-import subprocess
 import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
+AUDIO_SUFFIXES = {'.mp3', '.ogg', '.oga', '.m4a', '.opus', '.webm', '.wav'}
+TRACK_ID_RE = re.compile(r'^[A-Za-z0-9]{22}$')
+DOWNLOAD_TIMEOUT = 180
 
-def extract_track_id(url: str) -> str:
-    """Extract track ID from Spotify URL."""
-    # Standard URL: https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC
-    match = re.search(r'open\.spotify\.com/track/([a-zA-Z0-9]+)', url)
+
+def extract_track_id(url: str):
+    """Extract track ID from a Spotify URL, URI, or bare ID."""
+    url = url.strip()
+
+    match = re.search(r'open\.spotify\.com/track/([A-Za-z0-9]+)', url)
     if match:
         return match.group(1)
 
-    # URI: spotify:track:4uLU6hMCjMI75M1A2tKUQC
-    match = re.search(r'spotify:track:([a-zA-Z0-9]+)', url)
+    match = re.search(r'spotify:track:([A-Za-z0-9]+)', url)
     if match:
         return match.group(1)
 
-    # Plain ID: 4uLU6hMCjMI75M1A2tKUQC
-    if re.match(r'^[a-zA-Z0-9]{22}$', url.strip()):
-        return url.strip()
+    if TRACK_ID_RE.match(url):
+        return url
 
     return None
 
 
 def get_track_metadata_oembed(track_id: str) -> dict:
-    """Get track metadata from Spotify oEmbed API (no auth needed)."""
-    import urllib.request
-    import urllib.error
-
+    """Get track metadata from Spotify's oEmbed API (no auth needed)."""
     url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{track_id}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -56,6 +60,7 @@ def get_track_metadata_oembed(track_id: str) -> dict:
             data = json.loads(resp.read())
             title = data.get('title', 'Unknown')
             artist = 'Unknown'
+            # oEmbed returns "Track · Artist"
             if ' · ' in title:
                 parts = title.split(' · ')
                 artist = parts[-1].strip()
@@ -65,175 +70,182 @@ def get_track_metadata_oembed(track_id: str) -> dict:
                 'artist': artist,
                 'thumbnail': data.get('thumbnail_url', ''),
             }
-    except Exception as e:
+    except (urllib.error.URLError, ValueError, OSError):
         return {'title': 'Unknown', 'artist': 'Unknown', 'thumbnail': ''}
 
 
-def download_with_spotify_dl(track_id: str, output_dir: str, quality: str) -> bool:
-    """Download using spotify-dl package."""
-    try:
-        from spotify_dl import download_track
-
-        # spotify-dl handles auth, decryption, and download
-        download_track(
-            track_id=track_id,
-            output_dir=output_dir,
-            quality=int(quality)
-        )
-        return True
-    except ImportError:
-        return False
-    except Exception as e:
-        print(f"  spotify-dl error: {e}")
-        return False
-
-
-def find_spotdl() -> str:
-    """Find spotdl executable path."""
-    import shutil
-    # Check PATH first
-    path = shutil.which('spotdl')
-    if path:
-        return path
-    # Check common Python user install locations
-    home = Path.home()
-    candidates = [
-        home / '.local/bin/spotdl',
-        home / 'Library/Python/3.9/bin/spotdl',
-        home / 'Library/Python/3.10/bin/spotdl',
-        home / 'Library/Python/3.11/bin/spotdl',
-        home / 'Library/Python/3.12/bin/spotdl',
-    ]
-    for c in candidates:
-        if c.exists():
-            return str(c)
-    return 'spotdl'  # Fallback, will fail if not found
-
-
-def download_with_spotdl(track_url: str, output_dir: str) -> bool:
-    """Download using spotdl (alternative tool)."""
-    spotdl_path = find_spotdl()
-    try:
-        result = subprocess.run(
-            [spotdl_path, 'download', track_url, '--output', output_dir],
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        if result.returncode != 0 and result.stderr:
-            # Check for common errors
-            if 'FFmpegError' in result.stderr:
-                print("  Note: spotdl requires ffmpeg. Install: brew install ffmpeg")
-            elif 'Deprecated Feature' in result.stderr:
-                print("  Note: spotdl requires Python 3.10+. Current: 3.9")
-            elif 'Connection' in result.stderr:
-                print("  Note: Network connection issue. Check your internet.")
-        return result.returncode == 0
-    except FileNotFoundError:
-        return False
-    except Exception as e:
-        print(f"  spotdl error: {e}")
-        return False
-
-
-def find_ytdlp() -> str:
-    """Find yt-dlp executable path."""
-    import shutil
-    path = shutil.which('yt-dlp')
+def find_executable(name: str) -> str:
+    """Find an executable on PATH or in common user-install locations."""
+    path = shutil.which(name)
     if path:
         return path
     home = Path.home()
-    candidates = [
-        home / '.local/bin/yt-dlp',
-        home / 'Library/Python/3.9/bin/yt-dlp',
-        home / 'Library/Python/3.10/bin/yt-dlp',
-        home / 'Library/Python/3.11/bin/yt-dlp',
-        home / 'Library/Python/3.12/bin/yt-dlp',
-    ]
-    for c in candidates:
-        if c.exists():
-            return str(c)
-    return 'yt-dlp'
+    for candidate in (
+        home / f'.local/bin/{name}',
+        *(home / f'Library/Python/3.{minor}/bin/{name}' for minor in range(9, 14)),
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return name
 
 
-def download_with_ytdlp(track_url: str, output_dir: str, audio_format: str) -> bool:
-    """Download using yt-dlp (works with YouTube search)."""
-    ytdlp_path = find_ytdlp()
-
-    # Get metadata for YouTube search
-    metadata = get_track_metadata_oembed(extract_track_id(track_url) or '')
-    search_query = f"{metadata['artist']} {metadata['title']}" if metadata['title'] != 'Unknown' else track_url
-
-    # Try YouTube search
+def _run_tool(cmd):
+    """Run a download tool. Returns (ok, stderr_text)."""
     try:
-        output_template = os.path.join(output_dir, '%(title)s.%(ext)s')
-        search_term = f'ytsearch1:{search_query}'
-
         result = subprocess.run(
-            [
-                ytdlp_path,
-                '--extract-audio',
-                '--audio-format', audio_format,
-                '--audio-quality', '0',
-                '-o', output_template,
-                search_term
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120
+            cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT
         )
-        if result.returncode == 0:
-            return True
-
-        if 'Connection' in (result.stderr or ''):
-            print("  Note: Network connection issue. YouTube may be blocked in your region.")
-            print("  Try using a VPN or proxy.")
+        return result.returncode == 0, (result.stderr or '')
     except FileNotFoundError:
-        return False
+        return False, 'not installed'
     except subprocess.TimeoutExpired:
-        print("  Note: Download timed out. Check your internet connection.")
-    except Exception as e:
-        print(f"  yt-dlp error: {e}")
-
-    return False
+        return False, 'timed out'
+    except Exception as e:  # noqa: BLE001 - report and try the next tool
+        return False, str(e)
 
 
-def convert_to_mp3(input_path: str, output_path: str) -> bool:
-    """Convert audio file to MP3 using ffmpeg."""
+def _diagnose(tool: str, stderr: str):
+    """Print a targeted hint for common tool failures."""
+    if not stderr or stderr == 'not installed':
+        return
+    hints = [
+        ('FFmpegError', 'ffmpeg is required. Install: brew install ffmpeg'),
+        ('Deprecated Feature', 'spotdl requires Python 3.10+'),
+        ('Connection', 'Network connection issue. Check your internet, or use a VPN '
+                       'if the source is region-blocked'),
+        ('Sign in to confirm', 'YouTube is blocking the request. Cookies or a proxy '
+                               'may be required'),
+    ]
+    for needle, hint in hints:
+        if needle in stderr:
+            print(f"  Note: {hint}")
+            return
+
+
+def spotdl_quality_flag(quality: str):
+    """
+    Return the quality flag spotdl understands, or None if unknown.
+
+    spotdl 3.x used '--quality <kbps>'; 4.x renamed it to '--bitrate <Nk>'.
+    Passing the wrong one makes spotdl exit before downloading, so we detect
+    the installed major version and fall back to omitting the flag entirely
+    rather than failing.
+    """
+    spotdl = find_executable('spotdl')
+    if not shutil.which(spotdl) and not Path(spotdl).exists():
+        return None
+
+    try:
+        result = subprocess.run([spotdl, '--version'], capture_output=True,
+                                text=True, timeout=15)
+        raw = (result.stdout or result.stderr or '').strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    match = re.search(r'(\d+)\.(\d+)', raw)
+    if not match:
+        return None
+
+    major = int(match.group(1))
+    if major >= 4:
+        return ['--bitrate', f'{quality}k']
+    return ['--quality', quality]
+
+
+def download_with_spotdl(track_url: str, output_dir: Path, quality: str) -> bool:
+    """Download using spotdl (Spotify URL -> audio via its own matching)."""
+    spotdl = find_executable('spotdl')
+    cmd = [spotdl, 'download', track_url, '--output', str(output_dir)]
+    flag = spotdl_quality_flag(quality)
+    if flag:
+        cmd += flag
+    else:
+        print("  Note: could not determine spotdl version, omitting quality flag")
+
+    ok, err = _run_tool(cmd)
+    if not ok:
+        if err == 'not installed':
+            print("  spotdl not found. Install: pip install spotdl")
+        else:
+            _diagnose('spotdl', err)
+        return False
+    return True
+
+
+def download_with_ytdlp(track_url: str, output_dir: Path, quality: str) -> bool:
+    """Download using yt-dlp (searches YouTube for the track)."""
+    ytdlp = find_executable('yt-dlp')
+    metadata = get_track_metadata_oembed(extract_track_id(track_url) or '')
+    if metadata['title'] == 'Unknown':
+        query = track_url
+    else:
+        query = f"{metadata['artist']} {metadata['title']}"
+
+    ok, err = _run_tool([
+        ytdlp,
+        '--extract-audio',
+        '--audio-format', 'mp3',
+        '--audio-quality', quality,
+        '-o', str(output_dir / '%(title)s.%(ext)s'),
+        f'ytsearch1:{query}',
+    ])
+    if not ok:
+        if err == 'not installed':
+            print("  yt-dlp not found. Install: pip install yt-dlp")
+        else:
+            _diagnose('yt-dlp', err)
+        return False
+    return True
+
+
+def find_audio_file(directory: Path):
+    """Return the single audio file in a directory, or None."""
+    if not directory.is_dir():
+        return None
+    for f in sorted(directory.iterdir()):
+        if f.is_file() and f.suffix.lower() in AUDIO_SUFFIXES:
+            return f
+    return None
+
+
+def convert_to_mp3(input_path: Path, output_path: Path) -> bool:
+    """Convert an audio file to MP3 using ffmpeg."""
+    ffmpeg = find_executable('ffmpeg')
+    ok, _ = _run_tool_ffmpeg(ffmpeg, input_path, output_path)
+    if not ok and not shutil.which(ffmpeg):
+        print("  ffmpeg not found. Install it: brew install ffmpeg")
+    return ok
+
+
+def _run_tool_ffmpeg(ffmpeg: str, input_path: Path, output_path: Path):
     try:
         result = subprocess.run(
-            [
-                'ffmpeg', '-i', input_path,
-                '-codec:a', 'libmp3lame',
-                '-b:a', '192k',
-                '-y', output_path
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60
+            [ffmpeg, '-i', str(input_path), '-codec:a', 'libmp3lame',
+             '-b:a', '192k', '-y', str(output_path)],
+            capture_output=True, text=True, timeout=120
         )
-        return result.returncode == 0
+        return result.returncode == 0, (result.stderr or '')
     except FileNotFoundError:
-        print("  ffmpeg not found. Install it: brew install ffmpeg")
-        return False
-    except Exception as e:
-        print(f"  ffmpeg error: {e}")
-        return False
+        return False, 'not installed'
+    except subprocess.TimeoutExpired:
+        return False, 'timed out'
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
 
 
 def install_dependencies():
-    """Install required Python packages."""
+    """Install the download tools this script actually shells out to."""
     print("\nInstalling dependencies...")
-    packages = ['spotipy', 'mutagen']
-    for pkg in packages:
+    for pkg in ('spotdl', 'yt-dlp'):
         try:
             subprocess.run(
                 [sys.executable, '-m', 'pip', 'install', '-q', pkg],
-                capture_output=True,
-                timeout=60
+                capture_output=True, timeout=180
             )
-        except Exception:
-            pass
+            print(f"  {pkg}: ok")
+        except Exception as e:  # noqa: BLE001
+            print(f"  {pkg}: failed ({e})")
+    print("Note: ffmpeg is also required for MP3 conversion: brew install ffmpeg")
 
 
 def main():
@@ -245,127 +257,113 @@ Examples:
   %(prog)s "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
   %(prog)s -o ./music -f mp3 "spotify:track:4uLU6hMCjMI75M1A2tKUQC"
 
-Supported download methods (tried in order):
-  1. spotify-dl (best quality, requires authentication)
-  2. spotdl (uses YouTube as source)
-  3. yt-dlp (uses Spotify embed + YouTube)
+Download methods (tried in order):
+  1. spotdl  - resolves the Spotify URL directly
+  2. yt-dlp  - searches YouTube for the track by title/artist
         """
     )
 
-    parser.add_argument('url', help='Spotify track URL or ID')
+    parser.add_argument('url', help='Spotify track URL, URI, or ID')
     parser.add_argument('-o', '--output', default='./downloads',
-                       help='Output directory (default: ./downloads)')
-    parser.add_argument('-f', '--format', choices=['ogg', 'mp3', 'm4a', 'wav'],
-                       default='mp3', help='Output format (default: mp3)')
+                        help='Output directory (default: ./downloads)')
+    parser.add_argument('-f', '--format',
+                        choices=['mp3', 'ogg', 'm4a', 'opus'], default='mp3',
+                        help='Output format (default: mp3)')
     parser.add_argument('-q', '--quality', choices=['96', '160', '320'],
-                       default='320', help='Audio quality in kbps (default: 320)')
+                        default='320',
+                        help='Audio quality in kbps (default: 320)')
     parser.add_argument('--install', action='store_true',
-                       help='Install dependencies and exit')
+                        help='Install the download tools and exit')
 
     args = parser.parse_args()
 
     if args.install:
         install_dependencies()
-        print("Dependencies installed.")
         return
 
-    # Extract track ID
     track_id = extract_track_id(args.url)
     if not track_id:
         print(f"Error: Could not extract track ID from: {args.url}")
-        print("Expected format: https://open.spotify.com/track/...")
+        print("Expected: https://open.spotify.com/track/... or a 22-char ID")
         sys.exit(1)
 
     track_url = f"https://open.spotify.com/track/{track_id}"
 
-    # Create output directory
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get metadata
-    print(f"\n{'='*60}")
-    print(f"  Spotify Track Downloader")
-    print(f"{'='*60}\n")
+    print(f"\n{'=' * 60}")
+    print("  Spotify Track Downloader")
+    print(f"{'=' * 60}\n")
 
     metadata = get_track_metadata_oembed(track_id)
-    print(f"  Track: {metadata['title']}")
+    print(f"  Track:  {metadata['title']}")
     print(f"  Artist: {metadata['artist']}")
-    print(f"  ID: {track_id}")
-    print()
+    print(f"  ID:     {track_id}\n")
 
-    # Try download methods in order
-    downloaded = False
+    # Each attempt downloads into its own scratch directory. Scanning the final
+    # output directory instead would let a previous run's file be picked up,
+    # converted, and deleted. The file must be moved out *before* the scratch
+    # directory is torn down.
     final_path = None
+    with tempfile.TemporaryDirectory(prefix='spdl_') as scratch:
+        for index, (label, downloader) in enumerate(
+            (("spotdl", download_with_spotdl), ("yt-dlp", download_with_ytdlp)),
+            start=1,
+        ):
+            attempt_dir = Path(scratch) / f"attempt{index}"
+            attempt_dir.mkdir()
 
-    # Method 1: spotify-dl
-    print("[1/3] Trying spotify-dl...")
-    downloaded = download_with_spotify_dl(track_id, str(output_dir), args.quality)
-    if downloaded:
-        # Find the downloaded file
-        for f in output_dir.iterdir():
-            if track_id in f.name or metadata['title'][:20] in f.name:
-                final_path = f
-                break
+            print(f"[{index}/2] Trying {label}...")
+            if not downloader(track_url, attempt_dir, args.quality):
+                continue
 
-    # Method 2: spotdl
-    if not downloaded:
-        print("[2/3] Trying spotdl...")
-        downloaded = download_with_spotdl(track_url, str(output_dir))
-        if downloaded:
-            for f in output_dir.iterdir():
-                if f.suffix in ['.ogg', '.mp3', '.m4a', '.opus']:
-                    final_path = f
-                    break
+            found = find_audio_file(attempt_dir)
+            if found is None:
+                print(f"  {label} reported success but produced no audio file")
+                continue
 
-    # Method 3: yt-dlp
-    if not downloaded:
-        print("[3/3] Trying yt-dlp...")
-        downloaded = download_with_ytdlp(track_url, str(output_dir), args.format)
-        if downloaded:
-            for f in output_dir.iterdir():
-                if f.suffix in ['.ogg', '.mp3', '.m4a', '.opus']:
-                    final_path = f
-                    break
+            base = re.sub(r'[<>:"/\\|?*]', '_', found.stem).strip() or track_id
+            # Keep the downloaded extension; the format is reconciled below.
+            final_path = output_dir / f"{base}{found.suffix.lower()}"
+            shutil.copy2(str(found), str(final_path))
+            break
 
-    if not downloaded:
-        print("\n" + "="*60)
+    if final_path is None:
+        print("\n" + "=" * 60)
         print("  Download failed!")
-        print("="*60)
+        print("=" * 60)
         print("\nTroubleshooting:")
         print("  1. Check your internet connection")
-        print("  2. Install ffmpeg: brew install ffmpeg")
-        print("  3. Install tools:")
-        print("     pip install spotdl        # Recommended")
-        print("     pip install yt-dlp        # Alternative")
-        print("\n  If YouTube is blocked in your region, use a VPN.")
-        print("\nManual download:")
-        print(f"  spotdl download {track_url}")
+        print("  2. Install the tools:  python main.py --install")
+        print("  3. Install ffmpeg:     brew install ffmpeg")
+        print("  4. If the source is region-blocked, use a VPN")
+        print(f"\nManual download:\n  spotdl download {track_url}")
         sys.exit(1)
 
-    # Convert format if needed
-    if final_path and final_path.exists():
-        target_ext = f".{args.format}"
-        if final_path.suffix != target_ext:
-            output_path = final_path.with_suffix(target_ext)
-            if args.format == 'mp3':
-                print(f"\nConverting to MP3...")
-                if convert_to_mp3(str(final_path), str(output_path)):
-                    final_path.unlink()  # Remove original
-                    final_path = output_path
-                    print(f"  ✓ Converted to MP3")
-                else:
-                    print(f"  Keeping original format: {final_path.suffix}")
-                    final_path = output_path.with_suffix(final_path.suffix)
+    # Reconcile the downloaded format with --format.
+    if args.format == 'mp3' and final_path.suffix.lower() != '.mp3':
+        converted = final_path.with_name(final_path.stem + '.converting.mp3')
+        print("\nConverting to MP3...")
+        if convert_to_mp3(final_path, converted):
+            mp3_path = final_path.with_suffix('.mp3')
+            converted.replace(mp3_path)
+            final_path.unlink()
+            final_path = mp3_path
+            print("  ✓ Converted to MP3")
+        else:
+            converted.unlink(missing_ok=True)
+            print(f"  Keeping original format: {final_path.suffix}")
+    elif final_path.suffix.lower() != f".{args.format}":
+        target = final_path.with_suffix(f".{args.format}")
+        final_path.replace(target)
+        final_path = target
 
-        print(f"\n{'='*60}")
-        print(f"  Download Complete!")
-        print(f"{'='*60}")
-        print(f"  File: {final_path}")
-        print(f"  Size: {final_path.stat().st_size / 1024:.1f} KB")
-        print()
-    else:
-        print("\nDownload completed but file location unclear.")
-        print(f"Check: {output_dir}")
+    print(f"\n{'=' * 60}")
+    print("  Download Complete!")
+    print(f"{'=' * 60}")
+    print(f"  File: {final_path}")
+    print(f"  Size: {final_path.stat().st_size / 1024:.1f} KB\n")
 
 
 if __name__ == "__main__":

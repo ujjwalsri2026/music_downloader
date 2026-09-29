@@ -1,12 +1,15 @@
-# Spotify Download Dependencies
-# Core - for track metadata and downloads
-spotipy>=2.21.0
-mutagen>=1.45.0
+# MusicGrab — Python Daemon Dependencies
+#
+# The daemon (daemon.py) and CLI (main.py) shell out to these two tools;
+# they are the actual downloaders. Everything else is Python stdlib.
 
-# Optional - for direct Spotify downloads (requires librespot)
-# Install separately: pip install librespot
+spotdl>=3.0.0
+yt-dlp>=2024.1.0
 
-# Alternative download tools (install separately)
-# pip install spotify-dl
-# pip install spotdl
-# brew install yt-dlp (or pip install yt-dlp)
+# NOT installable via pip, but required for MP3 conversion:
+#   macOS:  brew install ffmpeg
+#   Debian: sudo apt install ffmpeg
+#   Windows: choco install ffmpeg
+#
+# If ffmpeg is missing the tools still run, but any output that is not
+# already MP3 will be kept in its original format.

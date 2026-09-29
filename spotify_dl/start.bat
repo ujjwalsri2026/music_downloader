@@ -1,12 +1,11 @@
 @echo off
-REM start.bat — Start Spotify Download Daemon
+REM start.bat — Start the MusicGrab local download daemon
 
 echo ==========================================
-echo   Spotify Download Daemon
+echo   MusicGrab Download Daemon
 echo ==========================================
 echo.
 
-REM Check Python
 where python >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
     echo Error: Python not found
@@ -15,12 +14,28 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-REM Check/install dependencies
 echo Checking dependencies...
-pip install -q pycryptodome requests 2>nul
+where spotdl >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo   spotdl not found - installing...
+    pip install -q spotdl 2>nul
+)
+where yt-dlp >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo   yt-dlp not found - installing...
+    pip install -q yt-dlp 2>nul
+)
 
-REM Start daemon
-echo Starting daemon.
+where ffmpeg >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo Note: ffmpeg not found.
+    echo   Without it, non-MP3 audio is kept in its original format.
+    echo   Install: choco install ffmpeg
+    echo.
+)
+
+echo Starting daemon...
 echo.
-python "%~dp0\daemon.py" %*
+python -u "%~dp0\daemon.py" %*
 pause
