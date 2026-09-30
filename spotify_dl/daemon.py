@@ -18,11 +18,14 @@ API Endpoints:
 
 import atexit
 import json
+import os
 import re
 import shutil
 import signal
 import subprocess
 import tempfile
+import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
@@ -50,6 +53,8 @@ DEFAULT_ALLOWED_ORIGINS = (
     'https://*.github.io',
     'http://localhost',
     'http://127.0.0.1',
+    'https://localhost',
+    'https://127.0.0.1',
 )
 
 
@@ -76,13 +81,23 @@ def origin_allowed(origin: str, allowed: tuple) -> bool:
     """
     Decide whether to echo back an Origin header.
 
-    Matching is on the parsed host, never a string prefix. A prefix test would
-    let 'https://github.io.evil.example' or 'http://127.0.0.1.evil.example'
-    through, since both start with an allowed string. Subdomains are matched
-    per label, so 'evil-github.io' does not satisfy '*.github.io'.
+    Matching is on the parsed scheme + host, never a string prefix. A prefix
+    test would let 'https://github.io.evil.example' through, since it starts
+    with an allowed string. Wildcards require a real, non-empty leading label,
+    so 'evil-github.io' and '.github.io' both fail.
+
+    Note this is a browser-enforced control, not authentication: it decides
+    whether to hand back Access-Control-Allow-Origin. It does not stop a
+    non-browser client from reading the response, because there is no secret
+    material in this API.
     """
     if not origin or origin == 'null':
         return True  # non-browser client (curl) sends no Origin
+
+    # A browser never puts credentials or a trailing-dot FQDN in Origin.
+    # Rejecting both removes a class of parser-confusion tricks outright.
+    if '@' in origin or origin.rstrip().endswith('.'):
+        return False
 
     try:
         parsed = urlparse(origin)
@@ -93,22 +108,37 @@ def origin_allowed(origin: str, allowed: tuple) -> bool:
     host = (parsed.hostname or '').lower()
     if not host:
         return False
+    # No empty label segments: rejects '.github.io' and 'a..github.io'.
+    # Single-label hosts such as 'localhost' are legitimate here.
+    if any(not label for label in host.split('.')):
+        return False
 
     for pattern in allowed:
+        if pattern.strip() == '*':
+            return True  # explicit opt-in to any origin
         try:
             allowed_parsed = urlparse(pattern if '://' in pattern
                                       else f"https://{pattern}")
         except ValueError:
             continue
-        allowed_host = (allowed_parsed.hostname or '').lower()
+        allowed_host = (allowed_parsed.hostname or '').lower().rstrip('.')
         if not allowed_host:
+            continue
+        # Require the same scheme, so an allowlist of https://*.github.io is not
+        # silently satisfied by a plaintext http:// page on the same host.
+        if allowed_parsed.scheme != parsed.scheme:
             continue
 
         if '*' in allowed_host:
             suffix = allowed_host[allowed_host.index('*') + 1:]
-            # Require a label boundary: '*.github.io' must not match
-            # 'evil-github.io', and must not match the bare apex.
-            if suffix and host.endswith(suffix) and host != suffix.lstrip('.'):
+            if not suffix:
+                continue
+            if not host.endswith(suffix):
+                continue
+            label = host[: -len(suffix)]
+            # A wildcard stands for at least one label. Multi-label is fine
+            # ('a.b.github.io'); the empty-segment case is already rejected.
+            if label and not label.endswith('.'):
                 return True
         elif host == allowed_host:
             return True
@@ -125,8 +155,22 @@ class SpotifyDaemon:
         self.allowed_origins = tuple(allowed_origins)
         self.server = None
         self.temp_dir = Path(tempfile.mkdtemp(prefix='spotify_dl_'))
+        # One lock per track. ThreadingHTTPServer gives every request its own
+        # thread, so two requests for the same track would otherwise share a
+        # scratch directory and delete each other's in-progress download.
+        self._track_locks = {}
+        self._locks_guard = threading.Lock()
         atexit.register(self.cleanup)
         self._install_signal_handlers()
+
+    def track_lock(self, track_id: str) -> threading.Lock:
+        """Return the lock guarding this track's downloads."""
+        with self._locks_guard:
+            lock = self._track_locks.get(track_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._track_locks[track_id] = lock
+            return lock
 
     def _install_signal_handlers(self):
         """atexit does not run on SIGTERM, which is how supervisors stop us."""
@@ -199,74 +243,89 @@ class SpotifyDaemon:
         if output_format not in ALLOWED_FORMATS:
             output_format = 'mp3'
 
+        # Serialise downloads for the same track. Without this, two requests
+        # share scratch directories: one rmtree deletes the file the other is
+        # still writing, so a failed tool's partial output gets reported as the
+        # next tool's success.
+        with self.track_lock(track_id):
+            return self._download_locked(track_id, track_dir, output_format)
+
+    def _download_locked(self, track_id: str, track_dir: Path,
+                         output_format: str) -> dict:
         track_url = f"https://open.spotify.com/track/{track_id}"
         track_dir.mkdir(parents=True, exist_ok=True)
+        # Unique per invocation, so even a bug in the lock cannot make two
+        # in-flight runs share a directory.
+        run_id = uuid.uuid4().hex[:12]
 
-        # Every attempt gets a clean subdirectory. Sharing one directory lets a
-        # partial file from a failed tool be picked up as if it were the next
-        # tool's successful output.
-        for index, (tool, tool_args) in enumerate((
-            ('spotdl', ['download', track_url, '--format', output_format]),
-            ('yt-dlp', ['--extract-audio', '--audio-format', output_format,
-                        '--audio-quality', '0', track_url]),
-        ), start=1):
-            attempt_dir = track_dir / f"attempt{index}"
-            self._reset_dir(attempt_dir)
+        try:
+            for index, (tool, tool_args) in enumerate((
+                ('spotdl', ['download', track_url, '--format', output_format]),
+                ('yt-dlp', ['--extract-audio', '--audio-format', output_format,
+                            '--audio-quality', '0', track_url]),
+            ), start=1):
+                attempt_dir = track_dir / f"attempt{index}-{run_id}"
+                attempt_dir.mkdir(parents=True, exist_ok=True)
 
-            if tool == 'spotdl':
-                cmd = [find_executable('spotdl'), *tool_args,
-                       '--output', str(attempt_dir)]
-            else:
-                cmd = [find_executable('yt-dlp'), *tool_args,
-                       '-o', str(attempt_dir / '%(title)s.%(ext)s')]
+                if tool == 'spotdl':
+                    cmd = [find_executable('spotdl'), *tool_args,
+                           '--output', str(attempt_dir)]
+                else:
+                    cmd = [find_executable('yt-dlp'), *tool_args,
+                           '-o', str(attempt_dir / '%(title)s.%(ext)s')]
 
-            ok, err = self._run(cmd)
-            if not ok:
-                if err != 'not installed':
-                    print(f"{tool} failed: {err.strip()[:300]}")
-                continue
+                ok, err = self._run(cmd)
+                if not ok:
+                    if err != 'not installed':
+                        print(f"{tool} failed: {err.strip()[:300]}")
+                    continue
 
-            audio = self._find_audio(attempt_dir)
-            if audio is None:
-                print(f"{tool} reported success but produced no audio file")
-                continue
-            if audio.stat().st_size == 0:
-                print(f"{tool} produced a zero-byte file, treating as failure")
-                continue
+                audio = self._find_audio(attempt_dir)
+                if audio is None:
+                    print(f"{tool} reported success but produced no audio file")
+                    continue
 
-            # Promote the winning file to the track directory, replacing any
-            # leftover from an earlier request for the same track.
-            final = track_dir / audio.name
-            if final.exists():
-                final.unlink()
-            shutil.move(str(audio), str(final))
+                size = audio.stat().st_size
+                if size == 0:
+                    print(f"{tool} produced a zero-byte file, treating as failure")
+                    continue
 
-            suffix = final.suffix.lower().lstrip('.')
-            return {
-                'success': True,
-                'track_id': track_id,
-                'filename': final.name,
-                'size': final.stat().st_size,
-                'source_format': suffix,
-                'found_on': f'{tool} (YouTube-backed)',
-                # Percent-encode: download tool filenames routinely contain
-                # spaces, which are not valid in a URL.
-                'download_url': (
-                    f"http://{self.host}:{self.port}"
-                    f"/api/file/{track_id}/{quote(final.name)}"
-                ),
-            }
+                # Promote the winner to the track directory, replacing any
+                # leftover from an earlier request for the same track.
+                final = track_dir / audio.name
+                try:
+                    shutil.move(str(audio), str(final))
+                except OSError:
+                    # Windows/macOS can refuse to overwrite a file that another
+                    # thread currently has open for serving.
+                    if final.exists():
+                        final.unlink()
+                    shutil.move(str(audio), str(final))
+                final_size = final.stat().st_size
+
+                return {
+                    'success': True,
+                    'track_id': track_id,
+                    'filename': final.name,
+                    'size': final_size,
+                    'source_format': final.suffix.lower().lstrip('.'),
+                    'found_on': f'{tool} (YouTube-backed)',
+                    # Percent-encode: download tool filenames routinely contain
+                    # spaces, which are not valid in a URL.
+                    'download_url': (
+                        f"http://{self.host}:{self.port}"
+                        f"/api/file/{track_id}/{quote(final.name)}"
+                    ),
+                }
+        finally:
+            # Never leave scratch dirs behind, and never let them be fetched.
+            for stale in track_dir.glob('attempt*'):
+                shutil.rmtree(stale, ignore_errors=True)
 
         return {
             'success': False,
             'error': 'No download tool available. Install: pip install spotdl',
         }
-
-    @staticmethod
-    def _reset_dir(path: Path):
-        """Recreate a directory empty, discarding anything left by a prior run."""
-        shutil.rmtree(path, ignore_errors=True)
-        path.mkdir(parents=True, exist_ok=True)
 
 
 def create_handler(daemon):
@@ -280,10 +339,12 @@ def create_handler(daemon):
         # ─── CORS ───
         def _cors(self):
             origin = self.headers.get('Origin')
+            # Vary on both branches: the response differs by Origin, and a
+            # shared cache must not serve the allow decision to another origin.
+            self.send_header('Vary', 'Origin')
             if origin_allowed(origin, daemon.allowed_origins):
                 if origin and origin != 'null':
                     self.send_header('Access-Control-Allow-Origin', origin)
-                    self.send_header('Vary', 'Origin')
             else:
                 self.send_header('Access-Control-Allow-Origin', 'null')
 
@@ -374,7 +435,13 @@ def create_handler(daemon):
             try:
                 result = daemon.download_track(track_id, fmt)
             except Exception as e:  # noqa: BLE001 - never kill the thread
-                self._send_json({'success': False, 'error': str(e)}, 500)
+                # Never echo str(e) to the client: OSError messages embed the
+                # server's temp path and username.
+                print(f"download failed for {track_id}: {type(e).__name__}: {e}")
+                self._send_json(
+                    {'success': False, 'error': 'Internal error during download'},
+                    500
+                )
                 return
             self._send_json(result)
 
@@ -389,7 +456,7 @@ def create_handler(daemon):
             if filename:
                 # Path(...).name drops any directory component the client sent.
                 safe_name = Path(filename).name
-                if safe_name and safe_name not in ('.', '..'):
+                if safe_name and safe_name not in ('.', '..') and not safe_name.startswith('attempt'):
                     candidate = track_dir / safe_name
                     # Defence in depth: confirm the resolved path is still inside.
                     try:
@@ -406,7 +473,15 @@ def create_handler(daemon):
                 self._send_json({'error': 'File not found'}, 404)
                 return
 
-            size = file_path.stat().st_size
+            try:
+                # Open before stat'ing so a concurrent re-download cannot unlink
+                # the file between the two and leave us sending a bad length.
+                handle = open(file_path, 'rb')
+                size = os.fstat(handle.fileno()).st_size
+            except OSError:
+                self._send_json({'error': 'File not found'}, 404)
+                return
+
             ctype = MIME_TYPES.get(file_path.suffix.lower(), 'application/octet-stream')
             self.send_response(200)
             self.send_header('Content-Type', ctype)
@@ -419,12 +494,14 @@ def create_handler(daemon):
             self.end_headers()
 
             if self.command == 'HEAD':
+                handle.close()
                 return
             try:
-                with open(file_path, 'rb') as f:
-                    shutil.copyfileobj(f, self.wfile)
-            except (BrokenPipeError, ConnectionResetError):
+                shutil.copyfileobj(handle, self.wfile)
+            except (BrokenPipeError, ConnectionResetError, OSError):
                 pass  # client navigated away mid-transfer
+            finally:
+                handle.close()
 
     return RequestHandler
 

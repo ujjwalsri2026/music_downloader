@@ -28,3 +28,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# GitHub Pages staging dir
+_site/

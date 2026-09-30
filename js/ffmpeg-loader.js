@@ -106,7 +106,9 @@ const FFmpegLoader = (() => {
             ]);
 
             const outputData = await ffmpeg.readFile(outputName);
-            return new Blob([outputData.buffer], { type: 'audio/mpeg' });
+            // Pass the view, not outputData.buffer: if readFile ever returns a
+            // subarray view, .buffer would carry unrelated leading/trailing bytes.
+            return new Blob([outputData], { type: 'audio/mpeg' });
         } finally {
             ffmpeg.off('progress', onProgressEvent);
             // Best-effort cleanup; a failure here must not mask a real error.

@@ -142,11 +142,22 @@ def spotdl_quality_flag(quality: str):
     except (OSError, subprocess.SubprocessError):
         return None
 
-    match = re.search(r'(\d+)\.(\d+)', raw)
-    if not match:
+    # A banner can contain unrelated dotted numbers ("Python 3.11.9 (main)"),
+    # so prefer a spotdl-tagged line, then a standalone version, and only then
+    # give up. Never guess from an arbitrary number.
+    major = None
+    tagged = re.search(r'spotdl\s+v?(\d+)\.(\d+)', raw, re.IGNORECASE)
+    if tagged:
+        major = int(tagged.group(1))
+    else:
+        # A whole line that is just a version, allowing a patch component.
+        standalone = re.findall(r'(?m)^v?(\d+)\.\d+(?:\.\d+)*\s*$', raw)
+        if standalone:
+            major = int(standalone[-1].split('.')[0])
+
+    if major is None:
         return None
 
-    major = int(match.group(1))
     if major >= 4:
         return ['--bitrate', f'{quality}k']
     return ['--quality', quality]

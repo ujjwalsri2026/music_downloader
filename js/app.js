@@ -7,6 +7,7 @@ const App = (() => {
     const els = {};
     let currentResult = null;
     let isDownloading = false;
+    let isFetching = false;
 
     // ─── INIT ───
     function init() {
@@ -84,6 +85,11 @@ const App = (() => {
 
     // ─── FETCH ───
     async function handleFetch() {
+        // Without this, a double-click or Enter+Enter fires two full resolve
+        // pipelines. For Spotify that means two POST /api/download for the
+        // same track, which races the daemon.
+        if (isFetching) return;
+
         const url = els.urlInput.value.trim();
         if (!url) {
             shakeElement(els.inputCard);
@@ -99,7 +105,9 @@ const App = (() => {
             return;
         }
 
-        showLoading('Resolving track...');
+        isFetching = true;
+        els.fetchBtn.disabled = true;
+        setLoadingText('Resolving track...');
         hideError();
         hideResult();
 
@@ -110,6 +118,8 @@ const App = (() => {
         } catch (err) {
             showError(err.message || 'Failed to resolve the URL. Please try another link.');
         } finally {
+            isFetching = false;
+            els.fetchBtn.disabled = false;
             hideLoading();
         }
     }
@@ -117,8 +127,20 @@ const App = (() => {
     // ─── DOWNLOAD ───
     let activeController = null;
 
+    function setDownloadButton(label, iconClass, disabled) {
+        els.downloadBtn.querySelector('span').textContent = label;
+        els.downloadBtn.querySelector('i').className = iconClass;
+        els.downloadBtn.disabled = disabled;
+    }
+
     async function handleDownload() {
-        if (!currentResult || isDownloading) return;
+        // A second click cancels the in-flight download rather than being
+        // ignored, so the AbortController is actually reachable.
+        if (isDownloading) {
+            if (activeController) activeController.abort();
+            return;
+        }
+        if (!currentResult) return;
         if (!currentResult.streamUrl) {
             showError(currentResult.downloadNote ||
                 'No downloadable stream was found for this track.', { keepResult: true });
@@ -126,7 +148,7 @@ const App = (() => {
         }
 
         isDownloading = true;
-        els.downloadBtn.disabled = true;
+        setDownloadButton('Cancel', 'fa-solid fa-xmark', false);
         let audioBlob;
 
         try {
@@ -169,7 +191,7 @@ const App = (() => {
             }
         } finally {
             isDownloading = false;
-            els.downloadBtn.disabled = false;
+            setDownloadButton('Download MP3', 'fa-solid fa-download', false);
             activeController = null;
         }
     }
@@ -268,6 +290,9 @@ const App = (() => {
                 const proxyUrl = proxy + encodeURIComponent(url);
                 return await fetchWithProgress(proxyUrl);
             } catch (err) {
+                // A cancel must stop the loop, not silently restart the
+                // download against the next proxy.
+                if (err.name === 'AbortError') throw err;
                 lastError = err;
                 console.warn(`Proxy download failed:`, err);
             }
@@ -358,7 +383,7 @@ const App = (() => {
 
     // ─── UI STATE ───
     function showLoading(text) {
-        els.loadingText.textContent = text;
+        setLoadingText(text);
         els.loadingState.classList.remove('hidden');
         els.errorState.classList.add('hidden');
         els.resultState.classList.add('hidden');
@@ -366,6 +391,11 @@ const App = (() => {
         if (typeof gsap !== 'undefined' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
             gsap.from(els.loadingState, { opacity: 0, y: 10, duration: 0.3 });
         }
+    }
+
+    function setLoadingText(text) {
+        els.loadingText.textContent = text;
+        els.loadingState.classList.remove('hidden');
     }
 
     function hideLoading() {

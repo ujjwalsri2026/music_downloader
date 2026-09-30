@@ -84,8 +84,16 @@ python daemon.py --port 54321                        # custom port
 python daemon.py --allow-origin https://example.com  # extra CORS origin
 ```
 
-By default the daemon only accepts browser requests from `*.github.io`,
-`localhost`, and `127.0.0.1`. Requests from any other origin are refused.
+By default the daemon only echoes `Access-Control-Allow-Origin` for browsers on
+`https://*.github.io`, `http(s)://localhost`, and `http(s)://127.0.0.1`. Any
+other origin receives `Access-Control-Allow-Origin: null`, which makes the
+browser block the response.
+
+This is a browser-enforced control, not authentication. It stops other web pages
+from reading the daemon's replies through the browser, but it is not a secret
+and it does not stop a direct non-browser client (e.g. `curl`) on the same
+machine. Do not expose this port to a network you do not control — the
+`--host` default is `127.0.0.1` for that reason.
 
 ### CLI
 
@@ -183,8 +191,11 @@ music_downloader/
 - YouTube audio is M4A/WebM; MP3 conversion requires ffmpeg.wasm (~25MB, lazy-loaded)
 - **Spotify** requires the local daemon; without it the app falls back to a
   title/artist search
+- A daemon download can take 10–60 s. The browser waits up to 200 s; the daemon
+  itself gives the download tool 180 s
 - YouTube and SoundCloud frequently block direct cross-origin fetches, so those
-  downloads depend on the CORS proxies
+  downloads depend on the CORS proxies. The app tries a direct fetch first and
+  falls back to a proxy if it fails
 - Some platforms may change their API endpoints or page structure
 
 ## Troubleshooting
@@ -201,7 +212,11 @@ not in the allowlist — start the daemon with `--allow-origin <your-origin>`.
 
 Note that `spotdl` changed its quality flag between major versions (3.x used
 `--quality`, 4.x uses `--bitrate`). The CLI detects the installed version and
-uses the right one, so `-q` works on both.
+uses the right one, so `-q` works on both. The web app does not pass a bitrate
+at all, so it always takes `spotdl`'s default quality.
+
+Also note that `spotdl` 4.x caps output at 128 kbps unless the account has
+YTMusic Premium, so requesting `-q 320` may just re-encode to 128 kbps.
 
 ### Downloads always fail
 

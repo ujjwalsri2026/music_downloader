@@ -9,23 +9,37 @@ const Resolvers = (() => {
     ];
 
     const DEFAULT_DAEMON_PORT = 54321;
-    const DAEMON_TIMEOUT_MS = 2000;
+    // Liveness check must fail fast so a missing daemon is detected instantly.
+    const DAEMON_STATUS_TIMEOUT_MS = 2000;
+    // A real download takes tens of seconds. Aborting this at the status
+    // timeout made the daemon path impossible to ever succeed.
+    const DAEMON_DOWNLOAD_TIMEOUT_MS = 200000;
     const TRACK_ID_RE = /^[A-Za-z0-9]{22}$/;
 
     // ─── LOCAL DAEMON CLIENT ───
     // The daemon is optional; every call resolves to null on any failure so a
     // missing daemon degrades to the browser-only path instead of throwing.
+    function parseDaemonPort(value) {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        if (!/^[0-9]{1,5}$/.test(trimmed)) return null;
+        const port = parseInt(trimmed, 10);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+        return port;
+    }
+
     function daemonBase() {
         let port = DEFAULT_DAEMON_PORT;
         try {
             // Set ?daemon=1234 (or localStorage) when running the daemon on a
             // non-default port, e.g. `python daemon.py --port 1234`.
-            const fromQuery = new URLSearchParams(location.search).get('daemon');
-            if (fromQuery && /^\d{2,5}$/.test(fromQuery)) {
-                port = parseInt(fromQuery, 10);
+            const fromQuery = parseDaemonPort(
+                new URLSearchParams(location.search).get('daemon'));
+            if (fromQuery !== null) {
+                port = fromQuery;
             } else {
-                const stored = localStorage.getItem('musicgrab.daemonPort');
-                if (stored && /^\d{2,5}$/.test(stored)) port = parseInt(stored, 10);
+                const stored = parseDaemonPort(localStorage.getItem('musicgrab.daemonPort'));
+                if (stored !== null) port = stored;
             }
         } catch (e) {
             // localStorage can throw in private mode; fall back to the default.
@@ -33,9 +47,9 @@ const Resolvers = (() => {
         return `http://127.0.0.1:${port}`;
     }
 
-    async function daemonFetch(path, options = {}) {
+    async function daemonFetch(path, options = {}, timeoutMs = DAEMON_STATUS_TIMEOUT_MS) {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), DAEMON_TIMEOUT_MS);
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
             const response = await fetch(daemonBase() + path, {
                 ...options,
@@ -50,7 +64,7 @@ const Resolvers = (() => {
 
     async function checkDaemonStatus() {
         try {
-            return await daemonFetch('/api/status');
+            return await daemonFetch('/api/status', {}, DAEMON_STATUS_TIMEOUT_MS);
         } catch (err) {
             console.warn('Spotify daemon not reachable:', err.message);
             return null;
@@ -65,7 +79,7 @@ const Resolvers = (() => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ track_id: trackId, format })
-        });
+        }, DAEMON_DOWNLOAD_TIMEOUT_MS);
     }
 
     // ─── RESULT NORMALISATION ───
@@ -359,6 +373,7 @@ const Resolvers = (() => {
 
         // Prefer the local daemon, which can download straight from a Spotify URL.
         const daemonStatus = await checkDaemonStatus();
+        let daemonRanAndFailed = false;
         if (daemonStatus && daemonStatus.status === 'running') {
             try {
                 const result = await requestDaemonDownload(trackId, 'mp3');
@@ -380,8 +395,14 @@ const Resolvers = (() => {
                         daemonDownload: true
                     };
                 }
+                // The daemon answered and reported failure - that is a real
+                // failure worth surfacing, not a fallback trigger we hide.
+                daemonRanAndFailed = true;
+                console.warn('Spotify daemon reported failure:', result?.error);
             } catch (e) {
-                console.warn('Spotify daemon download failed, falling back:', e.message);
+                // Timeout or transport error: the daemon may be fine but slow,
+                // or gone entirely. Do NOT blame the daemon for this.
+                console.warn('Spotify daemon unreachable during download:', e.message);
             }
         }
 
@@ -398,10 +419,18 @@ const Resolvers = (() => {
             console.warn('JioSaavn search failed:', e);
         }
 
-        if (daemonStatus && daemonStatus.status === 'running') {
+        if (daemonRanAndFailed) {
             throw new Error(
                 `Found "${metadata.title}" by ${metadata.artist} on Spotify, but the ` +
                 `local daemon could not download it. Check the daemon terminal for errors.`
+            );
+        }
+        if (daemonStatus && daemonStatus.status === 'running') {
+            // It answered /api/status but the download never came back in time.
+            throw new Error(
+                `Found "${metadata.title}" by ${metadata.artist} on Spotify, but the ` +
+                `local daemon stopped responding mid-download. It may still be ` +
+                `working - wait a moment and try again, or raise the port timeout.`
             );
         }
         throw new Error(

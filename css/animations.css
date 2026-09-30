@@ -136,6 +136,13 @@
     animation: spin 1s linear infinite;
 }
 
+/* Disabled buttons: show the busy state, and never swallow clicks silently */
+button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
 /* Progress Bar Glow */
 @keyframes progressGlow {
     0%, 100% { box-shadow: 0 0 5px rgba(255,255,255,0.2); }
